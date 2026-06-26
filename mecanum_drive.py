@@ -6,11 +6,15 @@
       右摇杆左右控制原地自旋，
       两个摇杆可同时操作实现复合运动（如边前进边转圈）。
 
-硬件需求：编码电机 ×4（X 型麦克纳姆布局）
-  - M1（左前轮）— 正常接线
-  - M2（右前轮）— 反接 ⚠️
-  - M3（左后轮）— 正常接线
-  - M4（右后轮）— 反接 ⚠️
+硬件需求：
+  底盘 — 编码电机 ×4（X 型麦克纳姆布局）
+    - M1（左前轮）— 正常接线
+    - M2（右前轮）— 反接 ⚠️
+    - M3（左后轮）— 正常接线
+    - M4（右后轮）— 反接 ⚠️
+  执行机构 —
+    - DC1 / DC2 — 直流电机（收球），接动力扩展板
+    - M5 — 编码电机（滚球）
 
 操控速查：
   ┌────────────┬──────────────────────┐
@@ -22,7 +26,15 @@
   │  原地右转   │  右摇杆 →            │
   │  斜向移动   │  左摇杆 ↖↗↙↘        │
   │  复合运动   │  两摇杆同时推         │
+  │  收球正转   │  按 N2（开/关切换）  │
+  │  收球反转   │  按 N3（开/关切换）  │
+  │  滚球正转   │  按 N1（开/关切换）  │
+  │  滚球反转   │  按 N4（开/关切换）  │
   └────────────┴──────────────────────┘
+
+  互斥规则：
+  - 收球正转(100)中按 N3 → 取消(0)，反之亦然
+  - 滚球正转中按 N4 → 取消(0)，反之亦然
 
 麦克纳姆轮运动学模型（X 型布局）
 ==============================
@@ -66,6 +78,7 @@
 import novapi
 import time
 from mbuild import gamepad
+from mbuild import power_expand_board
 from mbuild.encoder_motor import encoder_motor_class
 
 # ==================== 配置常量 ====================
@@ -78,6 +91,14 @@ INVERT_VX = False       # True = 横向取反
 INVERT_VY = True        # True = 纵向取反（参考三轮车：电机正转=后退）
 INVERT_OMEGA = False    # True = 旋转取反
 
+# 收球直流电机配置
+DC_COLLECTOR_PORT1 = "DC1"   # 收球电机 1（动力扩展板通道 1）
+DC_COLLECTOR_PORT2 = "DC2"   # 收球电机 2（动力扩展板通道 2）
+DC_COLLECTOR_SPEED = 100     # 收球最大速度（正转收球）
+
+# 滚球编码电机配置
+ROLLER_SPEED = 80            # 滚球电机默认速度（0~100）
+
 # ==================== 硬件初始化 ====================
 # M1: 左前轮（正常接线）
 # M2: 右前轮（反接 ⚠️）
@@ -87,6 +108,7 @@ __motor_M1 = encoder_motor_class("M1", "INDEX1")
 __motor_M2 = encoder_motor_class("M2", "INDEX1")
 __motor_M3 = encoder_motor_class("M3", "INDEX1")
 __motor_M4 = encoder_motor_class("M4", "INDEX1")
+__motor_M5 = encoder_motor_class("M5", "INDEX1")  # 滚球电机
 
 # ==================== 运动学函数 ====================
 def mecanum_kinematics(Vx, Vy, omega):
@@ -136,17 +158,33 @@ def apply_dead_zone(value, threshold=DEAD_ZONE):
 
 
 def stop_all_motors():
-    """紧急停止所有电机"""
+    """紧急停止所有电机（含执行机构）"""
     __motor_M1.set_power(0)
     __motor_M2.set_power(0)
     __motor_M3.set_power(0)
     __motor_M4.set_power(0)
+    __motor_M5.set_power(0)
+    power_expand_board.set_power(DC_COLLECTOR_PORT1, 0)
+    power_expand_board.set_power(DC_COLLECTOR_PORT2, 0)
 
 # ==================== 启动确认 ====================
+# 收球 / 滚球状态（三态: 1=正转, -1=反转, 0=停止）
+dc_state = 0          # DC1+DC2 收球电机状态
+roller_state = 0      # M5 滚球电机状态
+
+# 按键边沿检测变量
+last_N1 = False
+last_N2 = False
+last_N3 = False
+last_N4 = False
+
 print("=" * 40)
 print("  麦克纳姆轮机器人已启动！")
 print("  左摇杆 → 全向移动")
 print("  右摇杆 ←→ 自旋")
+print("  N1 → M5 滚球正转  |  N4 → M5 滚球反转")
+print("  N2 → DC 收球正转  |  N3 → DC 收球反转")
+print("  (同组按键互斥：按另一方向=取消)")
 print("  方向校准: VX=%s VY=%s ω=%s" %
       ("反" if INVERT_VX else "正",
        "反" if INVERT_VY else "正",
@@ -181,11 +219,70 @@ while True:
     # --- 4. 运动学解算 ---
     M1_power, M2_power, M3_power, M4_power = mecanum_kinematics(Vx, Vy, omega)
 
-    # --- 5. 输出到电机 ---
+    # --- 5. 按键边沿触发（收球 / 滚球）---
+    cur_N1 = gamepad.is_key_pressed("N1")
+    cur_N2 = gamepad.is_key_pressed("N2")
+    cur_N3 = gamepad.is_key_pressed("N3")
+    cur_N4 = gamepad.is_key_pressed("N4")
+
+    # N1: M5 滚球正转（与 N4 反转互斥）
+    if cur_N1 and not last_N1:
+        if roller_state == 1:
+            roller_state = 0
+            __motor_M5.set_power(0)
+            print(">>> 滚球电机: 关")
+        else:
+            roller_state = 1
+            __motor_M5.set_power(ROLLER_SPEED)
+            print(">>> 滚球电机: 正转 (M5, +%d)" % ROLLER_SPEED)
+
+    # N4: M5 滚球反转（与 N1 正转互斥）
+    if cur_N4 and not last_N4:
+        if roller_state == -1:
+            roller_state = 0
+            __motor_M5.set_power(0)
+            print(">>> 滚球电机: 关")
+        else:
+            roller_state = -1
+            __motor_M5.set_power(-ROLLER_SPEED)
+            print(">>> 滚球电机: 反转 (M5, -%d)" % ROLLER_SPEED)
+
+    # N2: DC1+DC2 收球正转（与 N3 反转互斥）
+    if cur_N2 and not last_N2:
+        if dc_state == 1:
+            dc_state = 0
+            power_expand_board.set_power(DC_COLLECTOR_PORT1, 0)
+            power_expand_board.set_power(DC_COLLECTOR_PORT2, 0)
+            print(">>> 收球电机: 关")
+        else:
+            dc_state = 1
+            power_expand_board.set_power(DC_COLLECTOR_PORT1, DC_COLLECTOR_SPEED)
+            power_expand_board.set_power(DC_COLLECTOR_PORT2, DC_COLLECTOR_SPEED)
+            print(">>> 收球电机: 正转 (DC1+DC2, +%d)" % DC_COLLECTOR_SPEED)
+
+    # N3: DC1+DC2 收球反转（与 N2 正转互斥）
+    if cur_N3 and not last_N3:
+        if dc_state == -1:
+            dc_state = 0
+            power_expand_board.set_power(DC_COLLECTOR_PORT1, 0)
+            power_expand_board.set_power(DC_COLLECTOR_PORT2, 0)
+            print(">>> 收球电机: 关")
+        else:
+            dc_state = -1
+            power_expand_board.set_power(DC_COLLECTOR_PORT1, -DC_COLLECTOR_SPEED)
+            power_expand_board.set_power(DC_COLLECTOR_PORT2, -DC_COLLECTOR_SPEED)
+            print(">>> 收球电机: 反转 (DC1+DC2, -%d)" % DC_COLLECTOR_SPEED)
+
+    last_N1 = cur_N1
+    last_N2 = cur_N2
+    last_N3 = cur_N3
+    last_N4 = cur_N4
+
+    # --- 6. 输出到底盘电机 ---
     __motor_M1.set_power(M1_power)
     __motor_M2.set_power(M2_power)
     __motor_M3.set_power(M3_power)
     __motor_M4.set_power(M4_power)
 
-    # --- 6. 循环延时 ---
+    # --- 7. 循环延时 ---
     time.sleep(LOOP_DELAY)

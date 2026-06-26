@@ -98,18 +98,17 @@ DEBUG_MOTOR_TYPES = ["编码电机", "直流电机"]       # 电机类型名称
 DEBUG_MOTOR_NAMES = ["M1", "M2", "M3"]            # 电机编号名称
 
 # 标定模式配置（调试模式下 L1+R1 进入）
-# 已测：编码 1000° = 直走 58 cm
-CAL_DEG_PER_CM = 1000 / 58   # ≈ 17.24 编码度/厘米（改这个值来校准精度）
-CAL_TARGET_CM = 20           # ← 你要机器人走多少厘米，改这里！
-CAL_ANGLE = int(CAL_TARGET_CM * CAL_DEG_PER_CM)  # 自动换算成编码角度
-CAL_MOVE_SPEED = 20          # 标定移动最大转速（rpm）
+CAL_ANGLE_DEFAULT = 360      # 默认编码角度（度）
+CAL_ANGLE_STEP = 1000          # ↑↓ 每次调整步长
+CAL_ANGLE_COARSE = 1000       # ← → 粗调步长
+CAL_MOVE_SPEED = 50          # 标定移动最大转速（rpm）
 
 # S 曲线加速参数
-CAL_RAMP_UP = 0.4            # 加速段占比（sin 加速）
-CAL_RAMP_DOWN = 0.4          # 减速段占比（cos 减速）
+CAL_RAMP_UP = 0.2            # 加速段占比（sin 加速）
+CAL_RAMP_DOWN = 0.2          # 减速段占比（cos 减速）
 
 # 左右 PID 补偿参数
-CAL_PID_KP = 0.16             # 比例系数（左右进度差 → 速度修正）
+CAL_PID_KP = 0.3             # 比例系数（左右进度差 → 速度修正）
 
 # 正面切换 — 旋转矩阵常量（cos/sin of ±120°）
 COS120 = -0.5
@@ -163,14 +162,13 @@ debug_mode = False            # 当前是否在调试模式（≡ 键切换）
 debug_motor_type = 0          # 0=编码电机, 1=直流电机
 debug_motor_index = 0         # 0=M1, 1=M2, 2=M3
 debug_cal_mode = False        # 是否在标定子模式
+debug_cal_angle = CAL_ANGLE_DEFAULT  # 当前标定编码角度（度）
 debug_cal_running = False     # 标定移动是否正在执行
 debug_cal_M1_start = 0.0      # M1 起始编码角
 debug_cal_M2_start = 0.0      # M2 起始编码角
 debug_cal_M1_target = 0.0     # M1 目标编码增量
 debug_cal_M2_target = 0.0     # M2 目标编码增量
 debug_cal_done_time = 0.0     # 标定完成时刻（显示最终值用）
-debug_cal_auto_start = False   # 是否等待自动启动
-debug_cal_auto_time = 0.0      # 自动启动倒计时起始时刻
 
 # ==================== 运动学函数 ====================
 def rotate_velocity(Vx, Vy, face_index):
@@ -466,6 +464,7 @@ while True:
             # --- 标定完成后的最终值展示（2 秒）---
             if debug_cal_done_time > 0:
                 if novapi.timer() - debug_cal_done_time < 2.0:
+                    # 保持显示最终值 "Fxxx"
                     last_Up = cur_Up
                     last_Down = cur_Down
                     last_Left = cur_Left
@@ -479,40 +478,36 @@ while True:
                     time.sleep(LOOP_DELAY)
                     continue
                 else:
+                    # 恢复显示当前设定角度
                     debug_cal_done_time = 0.0
-                    __led.show("E%d" % CAL_ANGLE)
+                    __led.show("E%d" % debug_cal_angle if debug_cal_angle < 10000 else "E%dk" % (debug_cal_angle // 1000))
 
-            # --- 空闲状态：等待自动启动或手动触发 ---
-            __led.show("E%d" % CAL_ANGLE)
+            # --- 空闲状态：允许调整参数和执行 ---
+            __led.show("E%d" % debug_cal_angle if debug_cal_angle < 10000 else "E%dk" % (debug_cal_angle // 1000))
 
-            # 自动启动：进入标定模式 1 秒后自动执行
-            if debug_cal_auto_start and novapi.timer() - debug_cal_auto_time >= 1.0:
-                debug_cal_auto_start = False
-                debug_cal_start(CAL_ANGLE)
-                last_Up = cur_Up
-                last_Down = cur_Down
-                last_Left = cur_Left
-                last_Right = cur_Right
-                last_N1 = cur_N1
-                last_N2 = cur_N2
-                last_N3 = cur_N3
-                last_L1_debug = cur_L1
-                last_R1_debug = cur_R1
-                last_Menu = cur_Menu
-                time.sleep(LOOP_DELAY)
-                continue
+            # ↑/↓：微调步长，←/→：粗调步长
+            if cur_Up and not last_Up:
+                debug_cal_angle += CAL_ANGLE_STEP
+                print(">>> 标定角度: %d°" % debug_cal_angle)
+            if cur_Down and not last_Down:
+                debug_cal_angle = max(1, debug_cal_angle - CAL_ANGLE_STEP)
+                print(">>> 标定角度: %d°" % debug_cal_angle)
+            if cur_Left and not last_Left:
+                debug_cal_angle = max(1, debug_cal_angle - CAL_ANGLE_COARSE)
+                print(">>> 标定角度: %d°" % debug_cal_angle)
+            if cur_Right and not last_Right:
+                debug_cal_angle += CAL_ANGLE_COARSE
+                print(">>> 标定角度: %d°" % debug_cal_angle)
 
-            # N1：手动启动标定移动
+            # N1：启动标定移动（S曲线+PID+实时显示）
             if cur_N1 and not last_N1:
-                debug_cal_auto_start = False
-                debug_cal_start(CAL_ANGLE)
+                debug_cal_start(debug_cal_angle)
 
             # L1+R1 再次按下 → 退出标定模式
             if cur_L1 and cur_R1 and (not last_L1_debug or not last_R1_debug):
                 debug_cal_mode = False
                 debug_cal_running = False
                 debug_cal_done_time = 0.0
-                debug_cal_auto_start = False
                 stop_all_motors()
                 __led.show("Test")
                 print(">>> 退出标定模式，返回调试模式")
@@ -538,19 +533,20 @@ while True:
             continue
 
         # ==== 主调试模式 ====
-        # --- L1+R1 同时按下 → 进入标定模式（1秒后自动执行）---
+        # --- L1+R1 同时按下 → 进入标定模式 ---
         if cur_L1 and cur_R1 and (not last_L1_debug or not last_R1_debug):
             debug_cal_mode = True
+            debug_cal_angle = CAL_ANGLE_DEFAULT
             debug_cal_running = False
             debug_cal_done_time = 0.0
-            debug_cal_auto_start = True
-            debug_cal_auto_time = novapi.timer()
-            __led.show("E%d" % CAL_ANGLE)
+            __led.show("E%d" % debug_cal_angle)
             print("=" * 40)
-            print("  >>> 进入标定模式！1秒后自动执行...")
-            print("  目标: %d cm | 编码: %d°" % (CAL_TARGET_CM, CAL_ANGLE))
-            print("  S曲线+PID | N1=手动执行 | L1+R1=退出")
-            print("  显示屏: 实时编码 → 完成后最终编码(Fxxx)")
+            print("  >>> 进入标定模式！")
+            print("  算法: S曲线(sin加速→匀速→cos减速) + 左右PID补偿")
+            print("  ↑↓ ±%d° | ←→ ±%d°" % (CAL_ANGLE_STEP, CAL_ANGLE_COARSE))
+            print("  N1=执行前进  |  L1+R1=退出")
+            print("  显示屏: 移动中实时编码 → 完成后最终编码(Fxxx)")
+            print("  测量实际距离 → 编码°/cm = %d° / 实际cm" % debug_cal_angle)
             print("=" * 40)
             last_Up = last_Down = last_Left = last_Right = False
             last_N1 = last_N2 = last_N3 = False
