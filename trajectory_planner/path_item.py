@@ -1,4 +1,40 @@
-"""轨迹视觉项：绘制平滑曲线 + 起终点标记 + 与障碍物的碰撞高亮"""
+"""轨迹视觉项：绘制平滑曲线 + 起终点标记 + 与障碍物的碰撞高亮
+
+目的
+====
+PathItem 是 QGraphicsPathItem 的子类，负责在场地画布上渲染轨迹。
+它持有两套点：raw_points（鼠标原始采样）和 smoothed_points（平滑后）。
+绘制时优先使用 smoothed_points；绘制过程中（鼠标还没抬起）调 preview_raw() 用原始点实时预览。
+
+坐标系
+======
+场景单位 = cm，+Y 朝上（FieldView 用 scale(1,-1) 翻转屏幕 Y 轴）。
+PathItem 不关心坐标系细节，直接用传入的 (x, y) 画线。
+
+颜色语义
+========
+  COLOR_NORMAL  = 蓝色 — 正常，不与任何障碍物相交
+  COLOR_COLLIDE = 红色 — 路径与至少一个障碍物相交（仅视觉警告，不阻止导出）
+
+标记
+====
+  _start_marker  绿色小圆，标记轨迹起点
+  _end_marker    红色小圆，标记轨迹终点
+
+注意
+====
+- set_collision() 由 FieldScene._refresh_collision() 调用，外部不应直接调用。
+- raw_points 存储原始采样，导出 JSON 时也保存，以便用新参数重新平滑。
+- 标记尺寸固定为 2.5 cm 半径，与场地缩放无关（场景坐标）。
+
+API
+===
+  set_points(raw, smoothed)        更新双套点并重绘
+  append_raw(x, y)                 绘制中追加采样点
+  preview_raw()                    只用 raw_points 预览（绘制中调用）
+  clear()                          清空所有点
+  set_collision(collide: bool)     切换碰撞高亮颜色
+"""
 from PyQt5 import QtCore, QtGui, QtWidgets
 
 from .config import PATH_PEN_WIDTH_CM

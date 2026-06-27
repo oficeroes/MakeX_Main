@@ -1,7 +1,45 @@
-"""安全写回 mecanum_forward.py 的 AUTO_SEQUENCE 块
+"""安全写回机器人源文件的 AUTO_SEQUENCE 块
 
-策略：锚行查找 + 括号计数定位结束行；写入前备份，写入后 ast.parse 校验；
-失败自动回滚 .bak。
+目的
+====
+把 kinematics.build_sequence() 生成的元组列表替换写入指定机器人 .py 文件中的
+AUTO_SEQUENCE = [...] 块，同时可选更新 AUTO_RAMP_MS 整数常量。
+
+安全策略
+========
+1. 备份：写入前把原文件复制为 .bak（覆盖上一次备份）。
+2. 锚行 + 括号计数定位：找到 `AUTO_SEQUENCE = [` 开头的行，
+   然后逐字符计 `[` +1 / `]` -1，深度归零时即找到结束行。
+   跳过 # 注释和引号字符串中的方括号（见 _strip_strings_and_comments）。
+3. 原子写入：先写 .tmp，`ast.parse()` 通过后用 `os.replace()` 覆盖原文件。
+4. 落盘校验：覆盖后再 parse 一次，失败则从 .bak 回滚。
+
+upsert_int_constant
+-------------------
+用于就地修改 `AUTO_RAMP_MS = <int>` 这行。
+若文件里没有此行则自动插在 AUTO_SEQUENCE 上方。
+只处理单行整数赋值；不支持多行表达式。
+
+支持多底盘
+==========
+write_auto_sequence 的 robot_file 参数默认为 config.ROBOT_FILE（omni3），
+main_window.py 在调用时会根据当前 ChassisProfile 传入正确路径。
+
+注意
+====
+- 标定导出时传 ramp_ms=0，禁用插值，使测量更准确。
+- AUTO_SEQUENCE 块必须在文件里唯一（查找第一个匹配）。
+- .bak 文件每次被覆盖，不保留历史，需要更多版本控制请用 git。
+
+API
+===
+  find_auto_sequence_range(text) -> (start_line, end_line)   # 0-based
+  upsert_int_constant(text, name, value) -> str
+  format_sequence_block(sequence, source_name, mode,
+                        cm_per_s_at_p50, auto_power) -> str
+  write_auto_sequence(sequence, robot_file=ROBOT_FILE, source_name,
+                      mode, cm_per_s_at_p50, auto_power,
+                      ramp_ms=None) -> (backup_path, True)
 """
 import ast
 import os

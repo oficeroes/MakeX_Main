@@ -1,4 +1,36 @@
-"""轨迹平滑：Chaikin 角点切割 + 等弧长重采样"""
+"""轨迹平滑：Chaikin 角点切割 + 等弧长重采样
+
+目的
+====
+将用户徒手绘制的折线（采样率不均、噪点多）变成平滑且等间距的点列，
+再交给 kinematics.py 计算每段的运动时间和方向。
+
+算法
+====
+1. Chaikin 角点切割（iterations 次，默认 3）
+   每次迭代把每条线段替换成两个新点：
+     Q = 3/4 * P0 + 1/4 * P1
+     R = 1/4 * P0 + 3/4 * P1
+   多次迭代后逼近二次 B 样条（近似弧形），仅用乘法，无 scipy 依赖。
+   端点固定（起点/终点不移动）。
+
+2. 等弧长重采样（step = 5 cm 默认）
+   沿曲线累计行进距离，每走 step 厘米插值取一个点。
+   结果：相邻点间距均等，kinematics 每段运动时间 = step / speed，简洁直接。
+
+注意
+====
+- Chaikin 迭代数 > 5 时平滑效果边际递减，且点数以 ~2× 增长，没必要超过 5。
+- resample 末端逻辑：最后一个原始端点若距输出末点 > 0.3 * step，则强制追加，
+  避免因浮点累积导致终点丢失。
+- 纯标准库实现（math 模块），可在无 numpy/scipy 的环境运行。
+
+API
+===
+  chaikin(points, iterations=3) -> list[(x,y)]
+  resample(points, step) -> list[(x,y)]
+  smooth_and_resample(raw_points, iterations, step) -> list[(x,y)]
+"""
 import math
 
 

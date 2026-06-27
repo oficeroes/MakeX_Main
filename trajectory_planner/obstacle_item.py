@@ -1,7 +1,44 @@
 """可拖拽、可缩放的障碍物方块（cm 单位）
 
-外观：半透明红色矩形 + 角落 8 个小手柄；选中后手柄出现，未选中只显示矩形。
-手柄拖拽时实时更新矩形。
+目的
+====
+ObstacleItem 是纯视觉参考物，不参与路径规划或避障计算。
+用户可以在画布上放置若干障碍物方块，模拟场地上的固定障碍，
+当轨迹线与障碍物矩形相交时 PathItem 会变红警告。
+
+交互设计
+========
+  拖拽矩形体：移动位置（ItemIsMovable）
+  点击选中：显示 8 个角/边中心手柄
+  拖拽手柄（_Handle）：实时调整矩形大小，最小 2 cm
+
+坐标系
+======
+QGraphicsRectItem 的 rect() 始终是 (0, 0, w, h)（本地坐标），
+位置通过 setPos(x_cm, y_cm) 设置。
+rect_scene() 合并两者，返回场景坐标 (x, y, w, h)。
+
+序列化
+======
+to_dict() / from_dict() 实现 JSON 往返：
+  {"x_cm": ..., "y_cm": ..., "width_cm": ..., "height_cm": ..., "label": ...}
+
+注意
+====
+- _notify_changed() 通过 hasattr 检测 scene().obstacle_changed，
+  避免在 scene 未挂载时出错。
+- ObstacleItem.itemChange 监听 ItemPositionHasChanged 触发碰撞刷新，
+  所以拖拽时不需要手动调用 refresh。
+- _Handle 类是内部实现细节，field_view._is_background() 有 isinstance 检测，
+  不要重命名或移出模块。
+
+API
+===
+  ObstacleItem(x_cm, y_cm, w_cm, h_cm, label="") -> item
+  rect_scene() -> (x, y, w, h)
+  set_size(w_cm, h_cm)
+  to_dict() -> dict
+  from_dict(d) -> ObstacleItem  (classmethod)
 """
 from PyQt5 import QtCore, QtGui, QtWidgets
 

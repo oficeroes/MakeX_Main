@@ -1,4 +1,50 @@
-"""场地画布：QGraphicsScene/View 单位 = cm，+Y 朝上，自动保持纵横比"""
+"""场地画布：QGraphicsScene/View 单位 = cm，+Y 朝上，自动保持纵横比
+
+坐标系设计
+==========
+场景单位直接等于厘米，消除像素↔cm 换算。
+FieldView 用 scale(1, -1) 翻转 Y 轴，使屏幕"上方"对应 +Y（机器人前进方向）。
+窗口缩放时 resizeEvent → fitInView(KeepAspectRatio) 保持场地比例，
+多余区域显示深灰色 letterbox。
+
+FieldScene（QGraphicsScene）
+============================
+职责：场地边框 + 网格 + 障碍物列表 + 单条轨迹 + 碰撞检测
+
+  场地边框：白色矩形，zValue=-100
+  网格：每 GRID_SPACING_CM(=10) cm 一条浅灰线，50 cm 倍数的线稍深，zValue=-99
+  障碍物：ObstacleItem 列表，zValue=10
+  轨迹：单个 PathItem，zValue=20
+  标记（起/终点小圆）：zValue=21，PathItem 的子项
+
+  碰撞检测：path().intersects(QRectF) 逐障碍判断，结果设给 PathItem.set_collision()。
+  每次障碍物移动/缩放（obstacle_changed 回调）和轨迹更新（finish_path/resmooth）都刷新。
+
+绘制流程（鼠标）
+================
+  mousePressEvent  → start_path(scene_pos)   : 清旧轨迹，开始新采样
+  mouseMoveEvent   → extend_path(scene_pos)  : 追加采样点 + preview_raw()
+  mouseReleaseEvent→ finish_path()           : Chaikin 平滑 + 重采样 + 刷新碰撞 + 发 path_finalized 信号
+
+  点到 ObstacleItem 或 _Handle 时，改为走 Qt 默认事件流（拖拽/选中），不开始画线。
+
+FieldView（QGraphicsView）
+==========================
+  - Antialiasing + SmoothPixmapTransform 渲染
+  - 禁用滚动条；fitInView 完全负责缩放
+  - _is_background(item)：判断命中项是否是"背景"（网格/底板），是则可以开始画线
+
+信号
+====
+  path_finalized      鼠标抬起、平滑完成后发射，main_window 用来更新状态栏
+  obstacles_changed   障碍物增删或几何变化后发射（预留，当前 main_window 未接）
+
+注意
+====
+- 同一时刻只有一条轨迹（self.path_item），新建时 clear()。
+- 平滑参数 smooth_iter / resample_step 由 main_window 在绘制前注入。
+- resmooth() 用新参数重跑现有 raw_points，无需重新画。
+"""
 from PyQt5 import QtCore, QtGui, QtWidgets
 
 from .config import GRID_SPACING_CM

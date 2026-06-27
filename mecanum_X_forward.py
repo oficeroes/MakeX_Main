@@ -1,0 +1,423 @@
+"""
+四轮 X 型麦克纳姆机器人 — 遥控操控程序
+=====================================
+描述：基于 Novapi 平台的 X 型麦克纳姆轮底盘遥控程序。
+      左摇杆控制全向移动（前进/后退/左右横移），
+      右摇杆左右控制原地自旋。
+
+      与 3 轮全向版本（mecanum_forward.py）相比：
+      - 4 个编码电机，运动学不同（见下方运动学模型）
+      - 没有 face/正面切换概念（X 麦克纳姆前后左右对称）
+      - R1/L1 键空出来可以用于其他功能（默认未绑定）
+
+硬件需求：编码电机 ×4
+  - M1（前左轮 FL）
+  - M2（前右轮 FR）
+  - M3（后左轮 BL）
+  - M4（后右轮 BR）
+
+操控速查：
+  ┌────────────┬──────────────────────┐
+  │  你想做的   │      手柄操作         │
+  ├────────────┼──────────────────────┤
+  │  前进后退   │  左摇杆 ↑↓           │
+  │  左右横移   │  左摇杆 ←→           │
+  │  原地左转   │  右摇杆 ←            │
+  │  原地右转   │  右摇杆 →            │
+  │  斜向移动   │  左摇杆 ↖↗↙↘        │
+  │  复合运动   │  两摇杆同时推         │
+  │  自动程序   │  按 +（加号键）      │
+  │  收球开关   │  按 N1（开/关切换）  │
+  │  调试开关   │  按 ≡（菜单键切换）  │
+  └────────────┴──────────────────────┘
+
+运动学模型：X 型麦克纳姆
+========================
+轮子布局（俯视）：
+             +Vy (前)
+              ↑
+       M1 ─────── M2
+       │           │
+       │   ROBOT   │
+       │           │
+       M3 ─────── M4
+
+  滚轮方向（俯视）：
+    M1（FL）：滚轮指向后右（↘ 45°）
+    M2（FR）：滚轮指向后左（↙ -45°）
+    M3（BL）：滚轮指向前右（↗ -45°）
+    M4（BR）：滚轮指向前左（↖ 45°）
+  从上往下看四个轮子的滚轮方向形成 "X" 字 → "X 型麦克纳姆"。
+
+  逆运动学方程（顺时针旋转为正）：
+    M1_power = +Vy + Vx + omega   (FL)
+    M2_power = +Vy - Vx - omega   (FR)
+    M3_power = +Vy - Vx + omega   (BL)
+    M4_power = +Vy + Vx - omega   (BR)
+
+  其中 Vx=横向速度(+右), Vy=纵向速度(+前), omega=旋转速度(+顺时针)
+
+  推导（直觉验证）：
+  - 纯前进 Vy=+1: 全部+1 → 向前 ✓
+  - 纯右移 Vx=+1: M1+, M2-, M3-, M4+ → 滚轮合力向右 ✓
+  - 纯右转 ω=+1: M1+, M2-, M3+, M4- → 左侧前进、右侧倒退 = 顺时针 ✓
+"""
+import novapi
+import time
+import math
+from mbuild import gamepad
+from mbuild import power_expand_board
+from mbuild.encoder_motor import encoder_motor_class
+from mbuild.led_matrix import led_matrix_class
+
+# ==================== 配置常量 ====================
+SPEED_SCALE = 0.6       # 全局速度倍率 (0~1)，安全起见默认 60%
+DEAD_ZONE = 8           # 摇杆死区阈值，小于此值的输入视为 0（防误触）
+LOOP_DELAY = 0.02       # 主循环周期（秒），20ms = 50Hz
+
+# 自动程序配置
+AUTO_SPEED = 50            # 自动程序默认速度（0~100）
+AUTO_STEP_DELAY = 0.02     # 自动程序步骤循环周期（秒）
+
+# 收球直流电机配置
+DC_COLLECTOR_PORT = "DC1"  # 动力扩展板通道
+DC_COLLECTOR_SPEED = 100   # 收球最大速度
+
+# 8x16 LED 点阵屏配置
+LED_PORT = "PORT2"
+LED_INDEX = "INDEX1"
+
+# 调试模式配置
+DEBUG_TEST_SPEED = 50
+DEBUG_MOTOR_TYPES = ["编码电机", "直流电机"]
+DEBUG_MOTOR_NAMES = ["M1", "M2", "M3", "M4"]
+
+# 标定模式：1000° 编码 = 直走多少 cm（需要根据实际机器人测量后修改）
+CAL_DEG_PER_CM = 1000 / 58   # 占位值，实测后改
+CAL_TARGET_CM = 20
+CAL_ANGLE = int(CAL_TARGET_CM * CAL_DEG_PER_CM)
+CAL_MOVE_SPEED = 20
+
+# S 曲线加速参数
+CAL_RAMP_UP = 0.4
+CAL_RAMP_DOWN = 0.4
+
+# 左右 PID 补偿
+CAL_PID_KP = 0.16
+
+# ==================== 硬件初始化 ====================
+__motor_M1 = encoder_motor_class("M1", "INDEX1")    # 前左 FL
+__motor_M2 = encoder_motor_class("M2", "INDEX1")    # 前右 FR
+__motor_M3 = encoder_motor_class("M3", "INDEX1")    # 后左 BL
+__motor_M4 = encoder_motor_class("M4", "INDEX1")    # 后右 BR
+__led = led_matrix_class(LED_PORT, LED_INDEX)
+
+# ==================== 自动程序 ====================
+# 自动程序步骤列表：每步 = (持续时间_秒, Vx, Vy, omega)
+#   Vx: 横向速度 (+右)，Vy: 纵向速度 (+前)，omega: 旋转速度 (+顺时针)
+#   最后一个步骤建议设为 (0.1, 0, 0, 0) 作为停止缓冲
+#
+# AUTO_RAMP_MS：步间速度线性插值时长（毫秒）
+#   每进入新步骤时，前 RAMP_MS 毫秒内速度从上一步线性插值到当前步，
+#   避免瞬间跳变带来的电流冲击 / 轮子打滑 / 机身震动。
+#   0 = 立即切换；100ms 是常用值；200ms 最软但路径偏差稍大。
+#   该常量会被 trajectory_planner 导出时覆盖。
+AUTO_RAMP_MS = 100
+AUTO_SEQUENCE = [
+    (4.0,  0, AUTO_SPEED,  0),   # 步骤 0: 前进 4 秒
+    (0.1,  0,           0,  0),   # 步骤 1: 停止 (缓冲结束)
+]
+
+# 自动程序运行时状态
+auto_mode = False
+auto_step = 0
+auto_step_start = 0.0
+auto_prev_Vx = 0.0
+auto_prev_Vy = 0.0
+auto_prev_omega = 0.0
+
+# ==================== 收球开关 ====================
+collector_on = False
+
+# ==================== 调试模式状态 ====================
+debug_mode = False
+debug_motor_type = 0
+debug_motor_index = 0
+
+
+# ==================== 运动学函数 ====================
+def mecanum_kinematics(Vx, Vy, omega):
+    """
+    X 型麦克纳姆逆运动学计算
+
+    参数:
+        Vx  (float): 横向目标速度（+右, -左），范围 -100~100
+        Vy  (float): 纵向目标速度（+前, -后），范围 -100~100
+        omega (float): 旋转目标速度（+顺时针, -逆时针），范围 -100~100
+
+    返回:
+        tuple: (M1_power, M2_power, M3_power, M4_power)，范围 -100~100
+              M1=FL, M2=FR, M3=BL, M4=BR
+    """
+    M1 = Vy + Vx + omega   # FL
+    M2 = Vy - Vx - omega   # FR
+    M3 = Vy - Vx + omega   # BL
+    M4 = Vy + Vx - omega   # BR
+
+    # 向量等比缩放：任一轮超 100 时，所有轮按比例缩小（保持方向不变）
+    max_abs = max(abs(M1), abs(M2), abs(M3), abs(M4))
+    if max_abs > 100:
+        scale = 100.0 / max_abs
+        M1 *= scale
+        M2 *= scale
+        M3 *= scale
+        M4 *= scale
+
+    return M1, M2, M3, M4
+
+
+def apply_dead_zone(value, threshold=DEAD_ZONE):
+    """摇杆死区过滤：绝对值小于阈值的值置零"""
+    if abs(value) < threshold:
+        return 0
+    return value
+
+
+def stop_all_motors():
+    """紧急停止所有电机"""
+    __motor_M1.set_power(0)
+    __motor_M2.set_power(0)
+    __motor_M3.set_power(0)
+    __motor_M4.set_power(0)
+
+
+def debug_stop_motor():
+    """停止调试模式中当前选中的测试电机"""
+    if debug_motor_type == 0:
+        motor = [__motor_M1, __motor_M2, __motor_M3, __motor_M4][debug_motor_index]
+        motor.set_power(0)
+    else:
+        power_expand_board.set_power(DC_COLLECTOR_PORT, 0)
+
+
+# ==================== 边沿触发辅助变量 ====================
+last_R1 = False
+last_L1 = False
+last_Plus = False
+last_Menu = False
+last_N1 = False
+
+last_Up = False
+last_Down = False
+last_Left = False
+last_Right = False
+last_N2 = False
+last_N3 = False
+
+# ==================== 启动确认 ====================
+print("=" * 40)
+print("  X 型麦克纳姆机器人已启动！")
+print("  左摇杆 → 全向移动")
+print("  右摇杆 ←→ 自旋")
+print("  + 键 → 自动程序")
+print("  ≡ 键 → 调试模式开关")
+print("=" * 40)
+
+__led.show("MecX")
+novapi.reset_timer()
+
+# ==================== 主循环 ====================
+while True:
+    # ================================================================
+    #  自动模式
+    # ================================================================
+    if auto_mode:
+        elapsed = novapi.timer() - auto_step_start
+        step_duration, step_Vx, step_Vy, step_omega = AUTO_SEQUENCE[auto_step]
+
+        if elapsed >= step_duration:
+            # 记录本步结束时的稳态速度作为下次插值起点
+            auto_prev_Vx = step_Vx
+            auto_prev_Vy = step_Vy
+            auto_prev_omega = step_omega
+
+            auto_step += 1
+            if auto_step >= len(AUTO_SEQUENCE):
+                stop_all_motors()
+                auto_mode = False
+                auto_step = 0
+                auto_prev_Vx = 0.0
+                auto_prev_Vy = 0.0
+                auto_prev_omega = 0.0
+                print(">>> 自动程序完成，恢复遥控")
+            else:
+                auto_step_start = novapi.timer()
+                next_dur, next_Vx, next_Vy, next_omega = AUTO_SEQUENCE[auto_step]
+                print(">>> 自动步骤 %d/%d: Vx=%d Vy=%d w=%d (%.1fs)" %
+                      (auto_step + 1, len(AUTO_SEQUENCE), next_Vx, next_Vy, next_omega, next_dur))
+        else:
+            # 步间速度线性插值（前 AUTO_RAMP_MS 毫秒）
+            if AUTO_RAMP_MS > 0 and elapsed * 1000.0 < AUTO_RAMP_MS:
+                alpha = elapsed * 1000.0 / AUTO_RAMP_MS
+                Vx_out = auto_prev_Vx + (step_Vx - auto_prev_Vx) * alpha
+                Vy_out = auto_prev_Vy + (step_Vy - auto_prev_Vy) * alpha
+                omega_out = auto_prev_omega + (step_omega - auto_prev_omega) * alpha
+            else:
+                Vx_out = step_Vx
+                Vy_out = step_Vy
+                omega_out = step_omega
+
+            M1_power, M2_power, M3_power, M4_power = mecanum_kinematics(Vx_out, Vy_out, omega_out)
+            __motor_M1.set_power(M1_power)
+            __motor_M2.set_power(M2_power)
+            __motor_M3.set_power(M3_power)
+            __motor_M4.set_power(M4_power)
+
+        time.sleep(AUTO_STEP_DELAY)
+        continue
+
+    # ================================================================
+    #  调试模式
+    # ================================================================
+    if debug_mode:
+        cur_Up = gamepad.is_key_pressed("Up")
+        cur_Down = gamepad.is_key_pressed("Down")
+        cur_Left = gamepad.is_key_pressed("Left")
+        cur_Right = gamepad.is_key_pressed("Right")
+        cur_N1 = gamepad.is_key_pressed("N1")
+        cur_N2 = gamepad.is_key_pressed("N2")
+        cur_N3 = gamepad.is_key_pressed("N3")
+        cur_Menu = gamepad.is_key_pressed("≡")
+
+        if cur_Menu and not last_Menu:
+            debug_stop_motor()
+            debug_mode = False
+            stop_all_motors()
+            __led.show("MecX")
+            print(">>> 退出调试模式")
+            last_Menu = cur_Menu
+            time.sleep(0.3)
+            continue
+
+        if cur_Up and not last_Up:
+            debug_motor_type = (debug_motor_type + 1) % len(DEBUG_MOTOR_TYPES)
+            print(">>> 电机类型: %s" % DEBUG_MOTOR_TYPES[debug_motor_type])
+        if cur_Down and not last_Down:
+            debug_motor_type = (debug_motor_type - 1) % len(DEBUG_MOTOR_TYPES)
+            print(">>> 电机类型: %s" % DEBUG_MOTOR_TYPES[debug_motor_type])
+
+        if cur_Left and not last_Left:
+            debug_motor_index = (debug_motor_index - 1) % len(DEBUG_MOTOR_NAMES)
+            print(">>> 电机编号: %s" % DEBUG_MOTOR_NAMES[debug_motor_index])
+        if cur_Right and not last_Right:
+            debug_motor_index = (debug_motor_index + 1) % len(DEBUG_MOTOR_NAMES)
+            print(">>> 电机编号: %s" % DEBUG_MOTOR_NAMES[debug_motor_index])
+
+        if cur_N2 and cur_N3:
+            debug_stop_motor()
+            debug_mode = False
+            __led.show("MecX")
+            print(">>> 退出调试模式")
+            last_Menu = cur_Menu
+            time.sleep(0.3)
+            continue
+
+        if cur_N1:
+            speed = DEBUG_TEST_SPEED
+        elif cur_N2:
+            speed = -DEBUG_TEST_SPEED
+        else:
+            speed = 0
+
+        if debug_motor_type == 0:
+            motor = [__motor_M1, __motor_M2, __motor_M3, __motor_M4][debug_motor_index]
+            motor.set_power(speed)
+        else:
+            power_expand_board.set_power(DC_COLLECTOR_PORT, speed)
+
+        last_Up = cur_Up
+        last_Down = cur_Down
+        last_Left = cur_Left
+        last_Right = cur_Right
+        last_N1 = cur_N1
+        last_N2 = cur_N2
+        last_N3 = cur_N3
+        last_Menu = cur_Menu
+
+        time.sleep(LOOP_DELAY)
+        continue
+
+    # ================================================================
+    #  正常模式（手动遥控）
+    # ================================================================
+    Lx = gamepad.get_joystick("Lx")
+    Ly = gamepad.get_joystick("Ly")
+    Rx = gamepad.get_joystick("Rx")
+
+    cur_Plus = gamepad.is_key_pressed("+")
+    cur_Menu = gamepad.is_key_pressed("≡")
+    cur_N1 = gamepad.is_key_pressed("N1")
+
+    if cur_Menu and not last_Menu:
+        if debug_mode:
+            debug_stop_motor()
+            debug_mode = False
+            stop_all_motors()
+            __led.show("MecX")
+            print(">>> 退出调试模式")
+        else:
+            debug_mode = True
+            debug_motor_type = 0
+            debug_motor_index = 0
+            __led.show("Test")
+            last_Up = last_Down = last_Left = last_Right = False
+            last_N1 = last_N2 = last_N3 = False
+            last_Menu = cur_Menu
+            print("=" * 40)
+            print("  >>> 进入调试模式！")
+            print("  ↑↓ 切换电机类型 | ← → 切换电机编号")
+            print("  N1=+50  N2=-50  |  N2+N3=退出")
+            print("=" * 40)
+        last_Menu = cur_Menu
+        time.sleep(0.3)
+        continue
+
+    if cur_Plus and not last_Plus:
+        auto_mode = True
+        auto_step = 0
+        auto_step_start = novapi.timer()
+        auto_prev_Vx = 0.0
+        auto_prev_Vy = 0.0
+        auto_prev_omega = 0.0
+        dur0, Vx0, Vy0, w0 = AUTO_SEQUENCE[0]
+        print(">>> 自动程序启动！步骤 1/%d: Vx=%d Vy=%d w=%d (%.1fs)" %
+              (len(AUTO_SEQUENCE), Vx0, Vy0, w0, dur0))
+    if cur_N1 and not last_N1:
+        collector_on = not collector_on
+        if collector_on:
+            power_expand_board.set_power(DC_COLLECTOR_PORT, DC_COLLECTOR_SPEED)
+            print(">>> 收球电机: 开 (正转 %d)" % DC_COLLECTOR_SPEED)
+        else:
+            power_expand_board.set_power(DC_COLLECTOR_PORT, 0)
+            print(">>> 收球电机: 关")
+
+    last_Plus = cur_Plus
+    last_Menu = cur_Menu
+    last_N1 = cur_N1
+
+    Lx = apply_dead_zone(Lx)
+    Ly = apply_dead_zone(Ly)
+    Rx = apply_dead_zone(Rx)
+
+    Vx =  Lx * SPEED_SCALE
+    Vy = -Ly * SPEED_SCALE       # 摇杆上推 Ly>0，根据实际接线决定是否取反
+    omega = Rx * SPEED_SCALE
+
+    M1_power, M2_power, M3_power, M4_power = mecanum_kinematics(Vx, Vy, omega)
+
+    __motor_M1.set_power(M1_power)
+    __motor_M2.set_power(M2_power)
+    __motor_M3.set_power(M3_power)
+    __motor_M4.set_power(M4_power)
+
+    time.sleep(LOOP_DELAY)

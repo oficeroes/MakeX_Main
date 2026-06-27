@@ -1,7 +1,59 @@
 """轨迹 → AUTO_SEQUENCE 转换
 
-输入：平滑后的点列（cm 坐标，+Y 前 / +X 右），标定参数
-输出：[(duration_sec, Vx, Vy, omega), ...]
+目的
+====
+把平滑后的点列（cm 坐标，+Y 朝前 / +X 朝右）变成机器人可执行的
+AUTO_SEQUENCE 元组列表：[(duration_sec, Vx, Vy, omega), ...]
+
+坐标约定（GUI 视角，build_sequence 入口处使用的语义）
+=====
+  +X = 右    +Y = 前    omega > 0 = 顺时针旋转
+
+注意：Vx/Vy 是电机功率百分比（-100~100），不是 cm/s！
+速度由 cm_per_s_at_p50 标定常数换算。
+
+两种运动模式
+============
+MODE_TRANSLATION（纯平移）
+  每段直接输出 (dt, Vx, Vy, 0)，车头方向不变。
+  Vx/Vy 方向向量 = 线段方向单位向量 × auto_power，
+  若合向量 > auto_power 则等比缩放（用于斜向运动）。
+
+MODE_HEADING（车头跟随路径）
+  每段先旋转再前进：
+    旋转步 = (|Δθ|/rot_speed, 0, 0, ±omega_power)
+    前进步 = (length/fwd_speed, 0, auto_power, 0)
+  旋转方向：机器人 +omega 顺时针，数学角增量 Δθ 逆时针 → 取反。
+  |Δθ| < ROTATION_DEADBAND_DEG 时跳过旋转步（去抖）。
+
+变换管线（build_sequence 内部顺序）
+====================================
+raw → merge_collinear → 漂移补偿 → 轴反转 + omega 镜像 → round → append STOP_BUFFER
+
+漂移补偿
+--------
+  drift_left_omega:  Vx < 0（GUI 视角向左）时附加的 omega（正=顺时针）
+  drift_right_omega: Vx > 0（GUI 视角向右）时附加的 omega
+  强度 = drift_omega * |Vx| / auto_power（斜移时按比例缩小）
+  → 补偿在反转之前做，所以语义永远是"你画图时画的那个方向"。
+
+轴反转
+------
+  invert_x / invert_y: 机器人前后/左右接反时使用。
+  单轴翻转 = 镜像变换 → omega 方向也要取反（omega_flip = -1）。
+  双轴翻转 = 180° 旋转 → omega 不变（omega_flip = 1）。
+
+注意
+====
+- auto_power / omega_power 被 _clamp_power 限制在 [POWER_MIN, POWER_MAX]。
+- 合并只合并方向夹角 < MERGE_ANGLE_DEG 且 omega 相同的连续步骤，防止过合并。
+- STOP_BUFFER = (0.1, 0, 0, 0) 是末尾停止缓冲，务必保留（让机器人正常减速）。
+
+API
+===
+  build_sequence(points, mode, cm_per_s_at_p50, deg_per_s_at_omega50,
+                 auto_power, omega_power, invert_x=False, invert_y=False,
+                 drift_left_omega=0, drift_right_omega=0) -> list[tuple]
 """
 import math
 from .config import (

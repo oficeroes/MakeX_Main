@@ -1,4 +1,20 @@
-"""入口点：python -m trajectory_planner.main"""
+"""入口点：python -m trajectory_planner.main
+
+用法
+====
+  cd D:\\UserData\\Desktop\\MakeX_Main
+  python -m trajectory_planner.main
+
+依赖
+====
+  pip install PyQt5
+  （其他依赖均为标准库：json / math / ast / os / shutil / re / pathlib）
+
+启动流程
+========
+  1. 检测 PyQt5，未安装则打印安装提示退出
+  2. QApplication("Fusion" 主题) → MainWindow → show() → exec_()
+"""
 import sys
 
 try:
