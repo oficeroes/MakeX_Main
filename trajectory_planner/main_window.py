@@ -102,152 +102,235 @@ class MainWindow(QtWidgets.QMainWindow):
     def _build_toolbar(self):
         tb = self.addToolBar("主工具栏")
         tb.setMovable(False)
+        tb.setToolButtonStyle(QtCore.Qt.ToolButtonTextOnly)
         tb.setIconSize(QtCore.QSize(20, 20))
 
-        act_new = tb.addAction("新建")
+        # 文件操作
+        act_new = tb.addAction("📄 新建")
+        act_new.setToolTip("清空画布，新建轨迹 (Ctrl+N)")
+        act_new.setShortcut("Ctrl+N")
         act_new.triggered.connect(self.on_new)
 
-        act_open = tb.addAction("导入")
+        act_open = tb.addAction("📂 导入")
+        act_open.setToolTip("从 JSON 文件导入轨迹 (Ctrl+O)")
+        act_open.setShortcut("Ctrl+O")
         act_open.triggered.connect(self.on_open)
 
-        act_save = tb.addAction("保存")
+        act_save = tb.addAction("💾 保存")
+        act_save.setToolTip("保存轨迹到 JSON (Ctrl+S)")
+        act_save.setShortcut("Ctrl+S")
         act_save.triggered.connect(self.on_save)
 
         tb.addSeparator()
 
-        act_export = tb.addAction("导出到机器人")
-        act_export.triggered.connect(self.on_export)
-
-        act_calib = tb.addAction("标定测试段")
-        act_calib.triggered.connect(self.on_calibration_export)
-
-        tb.addSeparator()
-
-        act_add_obs = tb.addAction("加障碍物")
-        act_add_obs.triggered.connect(self.on_add_obstacle)
-
-        act_del = tb.addAction("删除选中")
-        act_del.triggered.connect(self.on_delete_selected)
-
-        act_clear_path = tb.addAction("清空轨迹")
-        act_clear_path.triggered.connect(self.on_clear_path)
-
-    # ---- 右侧控件 ----
-    def _build_dock(self):
-        dock = QtWidgets.QDockWidget("控制面板", self)
-        dock.setAllowedAreas(QtCore.Qt.RightDockWidgetArea | QtCore.Qt.LeftDockWidgetArea)
-        dock.setFeatures(QtWidgets.QDockWidget.DockWidgetMovable)
-        self.addDockWidget(QtCore.Qt.RightDockWidgetArea, dock)
-
-        container = QtWidgets.QWidget()
-        outer = QtWidgets.QVBoxLayout(container)
-        outer.setContentsMargins(8, 8, 8, 8)
-
-        # --- 底盘选择 ---
-        g_chassis = QtWidgets.QGroupBox("底盘型号")
-        f_chassis = QtWidgets.QFormLayout(g_chassis)
+        # 底盘选择（直接放工具栏）
+        lbl_chassis = QtWidgets.QLabel("  底盘: ")
+        lbl_chassis.setStyleSheet("font-weight: bold;")
+        tb.addWidget(lbl_chassis)
         self.combo_chassis = QtWidgets.QComboBox()
+        self.combo_chassis.setMinimumWidth(180)
+        self.combo_chassis.setToolTip("选择当前机器人底盘型号，影响导出目标文件")
         for p in CHASSIS_PROFILES:
             self.combo_chassis.addItem(p.display_name, userData=p.profile_id)
         default_idx = next(
             (i for i, p in enumerate(CHASSIS_PROFILES) if p.profile_id == DEFAULT_PROFILE_ID), 0
         )
         self.combo_chassis.setCurrentIndex(default_idx)
-        self.lbl_chassis_desc = QtWidgets.QLabel(CHASSIS_PROFILES[default_idx].description)
-        self.lbl_chassis_desc.setWordWrap(True)
-        self.lbl_chassis_desc.setStyleSheet("color: #555; font-size: 11px;")
         self.combo_chassis.currentIndexChanged.connect(self._on_chassis_changed)
-        f_chassis.addRow(self.combo_chassis)
-        f_chassis.addRow(self.lbl_chassis_desc)
-        outer.addWidget(g_chassis)
+        tb.addWidget(self.combo_chassis)
 
-        # --- 场地 ---
-        g_field = QtWidgets.QGroupBox("场地尺寸 (cm)")
+        tb.addSeparator()
+
+        # 导出（视觉强调）
+        act_export = tb.addAction("🚀 导出到机器人")
+        act_export.setToolTip("将轨迹转换为 AUTO_SEQUENCE 并写入机器人源文件 (Ctrl+E)")
+        act_export.setShortcut("Ctrl+E")
+        act_export.triggered.connect(self.on_export)
+        # 让导出按钮加粗显示
+        for child in tb.children():
+            if isinstance(child, QtWidgets.QToolButton) and child.defaultAction() == act_export:
+                f = child.font(); f.setBold(True); child.setFont(f)
+                child.setStyleSheet("QToolButton { color: #1a6b1a; font-weight: bold; }")
+                break
+
+        act_calib = tb.addAction("📏 标定测试")
+        act_calib.setToolTip("导出 2 秒直走测试段，用尺子量距离反推速度标定值")
+        act_calib.triggered.connect(self.on_calibration_export)
+
+        tb.addSeparator()
+
+        # 画布操作
+        act_add_obs = tb.addAction("⬛ 加障碍物")
+        act_add_obs.setToolTip("在场地中央添加一个可拖拽障碍物方块")
+        act_add_obs.triggered.connect(self.on_add_obstacle)
+
+        act_del = tb.addAction("🗑 删除选中")
+        act_del.setToolTip("删除当前选中的障碍物 (Del)")
+        act_del.setShortcut("Del")
+        act_del.triggered.connect(self.on_delete_selected)
+
+        act_clear_path = tb.addAction("✕ 清空轨迹")
+        act_clear_path.setToolTip("清除当前画的轨迹（不影响障碍物）")
+        act_clear_path.triggered.connect(self.on_clear_path)
+
+    # ---- 右侧控件 ----
+    def _build_dock(self):
+        dock = QtWidgets.QDockWidget("参数面板", self)
+        dock.setAllowedAreas(QtCore.Qt.RightDockWidgetArea | QtCore.Qt.LeftDockWidgetArea)
+        dock.setFeatures(QtWidgets.QDockWidget.DockWidgetMovable)
+        self.addDockWidget(QtCore.Qt.RightDockWidgetArea, dock)
+
+        # 滚动区域：小屏不截断
+        scroll = QtWidgets.QScrollArea()
+        scroll.setWidgetResizable(True)
+        scroll.setFrameShape(QtWidgets.QFrame.NoFrame)
+        scroll.setHorizontalScrollBarPolicy(QtCore.Qt.ScrollBarAlwaysOff)
+
+        container = QtWidgets.QWidget()
+        outer = QtWidgets.QVBoxLayout(container)
+        outer.setContentsMargins(8, 8, 8, 8)
+        outer.setSpacing(6)
+
+        # --- 底盘描述（工具栏里已有选择器，这里只显示描述） ---
+        self.lbl_chassis_desc = QtWidgets.QLabel()
+        self.lbl_chassis_desc.setWordWrap(True)
+        self.lbl_chassis_desc.setStyleSheet(
+            "color: #444; font-size: 11px; padding: 4px 6px;"
+            "background: #f0f4ff; border: 1px solid #c8d4f0; border-radius: 4px;"
+        )
+        outer.addWidget(self.lbl_chassis_desc)
+
+        # --- 场地尺寸 ---
+        g_field = QtWidgets.QGroupBox("场地尺寸")
         f_field = QtWidgets.QFormLayout(g_field)
+        f_field.setRowWrapPolicy(QtWidgets.QFormLayout.DontWrapRows)
         self.sp_field_w = QtWidgets.QDoubleSpinBox()
-        self.sp_field_w.setRange(50, 1500); self.sp_field_w.setDecimals(1)
+        self.sp_field_w.setRange(50, 1500); self.sp_field_w.setDecimals(0)
         self.sp_field_w.setValue(DEFAULT_FIELD_WIDTH_CM); self.sp_field_w.setSuffix(" cm")
         self.sp_field_h = QtWidgets.QDoubleSpinBox()
-        self.sp_field_h.setRange(50, 1500); self.sp_field_h.setDecimals(1)
+        self.sp_field_h.setRange(50, 1500); self.sp_field_h.setDecimals(0)
         self.sp_field_h.setValue(DEFAULT_FIELD_HEIGHT_CM); self.sp_field_h.setSuffix(" cm")
         f_field.addRow("宽:", self.sp_field_w)
         f_field.addRow("高:", self.sp_field_h)
         outer.addWidget(g_field)
 
+        # --- 运动参数（合并最重要的参数） ---
+        g_motion = QtWidgets.QGroupBox("运动参数")
+        f_motion = QtWidgets.QFormLayout(g_motion)
+
+        self.sp_auto_power = QtWidgets.QSpinBox()
+        self.sp_auto_power.setRange(POWER_MIN, POWER_MAX)
+        self.sp_auto_power.setValue(DEFAULT_AUTO_POWER)
+        self.sp_auto_power.setToolTip("自动程序平移功率（%）。功率越高越快，越难控制精度")
+        f_motion.addRow("移动功率:", self.sp_auto_power)
+
+        self.sp_omega_power = QtWidgets.QSpinBox()
+        self.sp_omega_power.setRange(POWER_MIN, POWER_MAX)
+        self.sp_omega_power.setValue(DEFAULT_OMEGA_POWER)
+        self.sp_omega_power.setToolTip("车头跟随模式时的旋转功率（%）")
+        f_motion.addRow("旋转功率:", self.sp_omega_power)
+
+        # 模式按钮（颜色区分）
+        self.btn_mode = QtWidgets.QPushButton("模式: 纯平移")
+        self.btn_mode.setCheckable(True)
+        self.btn_mode.setToolTip(
+            "纯平移：车头固定，不跟随路径方向（推荐）\n"
+            "车头跟随：机器人自动旋转对准行进方向（需要额外标定 ω 速度）"
+        )
+        self.btn_mode.clicked.connect(self._on_toggle_mode)
+        f_motion.addRow(self.btn_mode)
+
+        # 轴反转（两个 checkbox 放一行）
+        inv_row = QtWidgets.QWidget()
+        inv_h = QtWidgets.QHBoxLayout(inv_row)
+        inv_h.setContentsMargins(0, 0, 0, 0)
+        self.chk_invert_x = QtWidgets.QCheckBox("反转 X")
+        self.chk_invert_x.setToolTip("勾选：所有 Vx 取反（左右安装方向反了时用）")
+        self.chk_invert_x.setChecked(DEFAULT_INVERT_X)
+        self.chk_invert_y = QtWidgets.QCheckBox("反转 Y")
+        self.chk_invert_y.setToolTip("勾选：所有 Vy 取反（前后安装方向反了时用）")
+        self.chk_invert_y.setChecked(DEFAULT_INVERT_Y)
+        inv_h.addWidget(self.chk_invert_x)
+        inv_h.addWidget(self.chk_invert_y)
+        inv_h.addStretch()
+        f_motion.addRow("轴反转:", inv_row)
+        outer.addWidget(g_motion)
+
         # --- 速度标定 ---
         g_cal = QtWidgets.QGroupBox("速度标定")
         f_cal = QtWidgets.QFormLayout(g_cal)
         self.sp_cm_per_s = QtWidgets.QDoubleSpinBox()
-        self.sp_cm_per_s.setRange(1, 300); self.sp_cm_per_s.setDecimals(2)
+        self.sp_cm_per_s.setRange(1, 300); self.sp_cm_per_s.setDecimals(1)
         self.sp_cm_per_s.setValue(DEFAULT_CM_PER_SEC_AT_P50); self.sp_cm_per_s.setSuffix(" cm/s")
+        self.sp_cm_per_s.setToolTip("功率=50 时机器人前进速度（cm/s）。用「标定测试」按钮实测后填入")
         self.sp_deg_per_s = QtWidgets.QDoubleSpinBox()
-        self.sp_deg_per_s.setRange(5, 720); self.sp_deg_per_s.setDecimals(1)
-        self.sp_deg_per_s.setValue(DEFAULT_DEG_PER_SEC_AT_OMEGA50); self.sp_deg_per_s.setSuffix(" deg/s")
-        f_cal.addRow("功率50时:", self.sp_cm_per_s)
-        f_cal.addRow("ω50时:", self.sp_deg_per_s)
+        self.sp_deg_per_s.setRange(5, 720); self.sp_deg_per_s.setDecimals(0)
+        self.sp_deg_per_s.setValue(DEFAULT_DEG_PER_SEC_AT_OMEGA50); self.sp_deg_per_s.setSuffix(" °/s")
+        self.sp_deg_per_s.setToolTip("omega=50 时机器人自转角速度（°/s）。车头跟随模式才需要标定")
+        f_cal.addRow("P50 直行:", self.sp_cm_per_s)
+        f_cal.addRow("P50 旋转:", self.sp_deg_per_s)
         outer.addWidget(g_cal)
 
-        # --- 运动参数 ---
-        g_motion = QtWidgets.QGroupBox("运动参数")
-        f_motion = QtWidgets.QFormLayout(g_motion)
-        self.sp_auto_power = QtWidgets.QSpinBox()
-        self.sp_auto_power.setRange(POWER_MIN, POWER_MAX); self.sp_auto_power.setValue(DEFAULT_AUTO_POWER)
-        self.sp_omega_power = QtWidgets.QSpinBox()
-        self.sp_omega_power.setRange(POWER_MIN, POWER_MAX); self.sp_omega_power.setValue(DEFAULT_OMEGA_POWER)
-        self.btn_mode = QtWidgets.QPushButton("模式: 纯平移")
-        self.btn_mode.setCheckable(True)
-        self.btn_mode.clicked.connect(self._on_toggle_mode)
-        self.chk_invert_x = QtWidgets.QCheckBox("反转 X 轴（左右装反时勾选）")
-        self.chk_invert_x.setChecked(DEFAULT_INVERT_X)
-        self.chk_invert_y = QtWidgets.QCheckBox("反转 Y 轴（前后装反时勾选）")
-        self.chk_invert_y.setChecked(DEFAULT_INVERT_Y)
-        f_motion.addRow("移动功率:", self.sp_auto_power)
-        f_motion.addRow("旋转功率:", self.sp_omega_power)
-        f_motion.addRow(self.btn_mode)
-        f_motion.addRow(self.chk_invert_x)
-        f_motion.addRow(self.chk_invert_y)
-        outer.addWidget(g_motion)
+        # --- 高级参数：速度过渡 + 漂移补偿（合并一组） ---
+        g_adv = QtWidgets.QGroupBox("高级参数")
+        f_adv = QtWidgets.QFormLayout(g_adv)
 
-        # --- 执行端：速度过渡 ---
-        g_ramp = QtWidgets.QGroupBox("速度过渡（写入机器人 AUTO_RAMP_MS）")
-        f_ramp = QtWidgets.QFormLayout(g_ramp)
         self.sp_ramp_ms = QtWidgets.QSpinBox()
         self.sp_ramp_ms.setRange(0, 1000); self.sp_ramp_ms.setSuffix(" ms")
-        self.sp_ramp_ms.setValue(DEFAULT_RAMP_MS)
-        self.sp_ramp_ms.setSingleStep(20)
-        self.sp_ramp_ms.setToolTip("步间速度线性插值时长。0=立即切换；100ms=常用；200ms=最软")
-        f_ramp.addRow("插值时长:", self.sp_ramp_ms)
-        outer.addWidget(g_ramp)
+        self.sp_ramp_ms.setValue(DEFAULT_RAMP_MS); self.sp_ramp_ms.setSingleStep(20)
+        self.sp_ramp_ms.setToolTip(
+            "步间速度插值时长（写入 AUTO_RAMP_MS）。\n"
+            "0=立即切换  100ms=常用  200ms=最平滑\n"
+            "标定测试时自动设为 0。"
+        )
+        f_adv.addRow("速度过渡:", self.sp_ramp_ms)
 
-        # --- 漂移补偿 ---
-        g_drift = QtWidgets.QGroupBox("平移漂移补偿 (omega)")
-        f_drift = QtWidgets.QFormLayout(g_drift)
         self.sp_drift_left = QtWidgets.QSpinBox()
         self.sp_drift_left.setRange(-30, 30); self.sp_drift_left.setValue(DEFAULT_DRIFT_LEFT_OMEGA)
         self.sp_drift_left.setToolTip(
-            "向左平移时机身若往右偏，填正数（+omega 顺时针补偿）。\n"
-            "强度按 |Vx|/auto_power 线性缩放。一般 1~5 起调。")
+            "向左平移时机身往右偏 → 填正数（顺时针补偿）\n"
+            "向左平移时机身往左偏 → 填负数\n"
+            "建议 1~5 起调，强度按 |Vx|/power 自动缩放"
+        )
         self.sp_drift_right = QtWidgets.QSpinBox()
         self.sp_drift_right.setRange(-30, 30); self.sp_drift_right.setValue(DEFAULT_DRIFT_RIGHT_OMEGA)
         self.sp_drift_right.setToolTip(
-            "向右平移时机身若往左偏，填负数；往右偏，填正数。\n"
-            "强度按 |Vx|/auto_power 线性缩放。")
-        f_drift.addRow("左移补偿:", self.sp_drift_left)
-        f_drift.addRow("右移补偿:", self.sp_drift_right)
-        outer.addWidget(g_drift)
+            "向右平移时机身往左偏 → 填负数\n"
+            "向右平移时机身往右偏 → 填正数\n"
+            "建议 1~5 起调，强度按 |Vx|/power 自动缩放"
+        )
+        # 两个漂移补偿放一行
+        drift_row = QtWidgets.QWidget()
+        drift_h = QtWidgets.QHBoxLayout(drift_row)
+        drift_h.setContentsMargins(0, 0, 0, 0); drift_h.setSpacing(4)
+        drift_h.addWidget(QtWidgets.QLabel("左"))
+        drift_h.addWidget(self.sp_drift_left)
+        drift_h.addWidget(QtWidgets.QLabel("右"))
+        drift_h.addWidget(self.sp_drift_right)
+        f_adv.addRow("漂移补偿:", drift_row)
+        outer.addWidget(g_adv)
 
-        # --- 平滑 ---
-        g_smooth = QtWidgets.QGroupBox("平滑参数")
+        # --- 平滑参数 ---
+        g_smooth = QtWidgets.QGroupBox("曲线平滑")
         f_smooth = QtWidgets.QFormLayout(g_smooth)
         self.sp_smooth = QtWidgets.QSpinBox()
         self.sp_smooth.setRange(0, 6); self.sp_smooth.setValue(DEFAULT_SMOOTH_ITER)
+        self.sp_smooth.setToolTip("Chaikin 迭代次数（0=不平滑，3=推荐，5=最圆滑）")
         self.sp_resample = QtWidgets.QDoubleSpinBox()
         self.sp_resample.setRange(1, 50); self.sp_resample.setDecimals(1)
         self.sp_resample.setValue(DEFAULT_RESAMPLE_CM); self.sp_resample.setSuffix(" cm")
+        self.sp_resample.setToolTip("等弧长重采样间隔。越小步骤越多路径越精确，越大导出步骤越少")
         btn_resmooth = QtWidgets.QPushButton("重新平滑")
+        btn_resmooth.setToolTip("用当前平滑参数重新处理已画的轨迹")
         btn_resmooth.clicked.connect(self.on_resmooth)
-        f_smooth.addRow("迭代次数:", self.sp_smooth)
-        f_smooth.addRow("采样间隔:", self.sp_resample)
+        smooth_row = QtWidgets.QWidget()
+        smooth_h = QtWidgets.QHBoxLayout(smooth_row)
+        smooth_h.setContentsMargins(0, 0, 0, 0); smooth_h.setSpacing(4)
+        smooth_h.addWidget(QtWidgets.QLabel("迭代"))
+        smooth_h.addWidget(self.sp_smooth)
+        smooth_h.addWidget(QtWidgets.QLabel("间隔"))
+        smooth_h.addWidget(self.sp_resample)
+        f_smooth.addRow(smooth_row)
         f_smooth.addRow(btn_resmooth)
         outer.addWidget(g_smooth)
 
@@ -255,36 +338,50 @@ class MainWindow(QtWidgets.QMainWindow):
         g_obs = QtWidgets.QGroupBox("选中的障碍物")
         f_obs = QtWidgets.QFormLayout(g_obs)
         self.sp_obs_w = QtWidgets.QDoubleSpinBox()
-        self.sp_obs_w.setRange(2, 1000); self.sp_obs_w.setDecimals(1)
-        self.sp_obs_w.setSuffix(" cm")
+        self.sp_obs_w.setRange(2, 1000); self.sp_obs_w.setDecimals(1); self.sp_obs_w.setSuffix(" cm")
         self.sp_obs_h = QtWidgets.QDoubleSpinBox()
-        self.sp_obs_h.setRange(2, 1000); self.sp_obs_h.setDecimals(1)
-        self.sp_obs_h.setSuffix(" cm")
-        self.sp_obs_w.setEnabled(False)
-        self.sp_obs_h.setEnabled(False)
-        f_obs.addRow("宽:", self.sp_obs_w)
-        f_obs.addRow("高:", self.sp_obs_h)
+        self.sp_obs_h.setRange(2, 1000); self.sp_obs_h.setDecimals(1); self.sp_obs_h.setSuffix(" cm")
+        self.sp_obs_w.setEnabled(False); self.sp_obs_h.setEnabled(False)
+        obs_row = QtWidgets.QWidget()
+        obs_h = QtWidgets.QHBoxLayout(obs_row)
+        obs_h.setContentsMargins(0, 0, 0, 0); obs_h.setSpacing(4)
+        obs_h.addWidget(QtWidgets.QLabel("宽"))
+        obs_h.addWidget(self.sp_obs_w)
+        obs_h.addWidget(QtWidgets.QLabel("高"))
+        obs_h.addWidget(self.sp_obs_h)
+        f_obs.addRow(obs_row)
         outer.addWidget(g_obs)
 
-        # --- 提示 ---
+        # --- 提示标签 ---
         self.lbl_face = QtWidgets.QLabel()
         self.lbl_face.setWordWrap(True)
-        self.lbl_face.setStyleSheet("color: #b56500; padding:6px; background:#fff7e0; border:1px solid #e0c080; border-radius:4px;")
+        self.lbl_face.setStyleSheet(
+            "color: #7a4000; padding: 6px; font-size: 11px;"
+            "background: #fff7e0; border: 1px solid #e0c080; border-radius: 4px;"
+        )
         self._refresh_hint_label()
         outer.addWidget(self.lbl_face)
 
         outer.addStretch(1)
-        dock.setWidget(container)
-        dock.setMinimumWidth(280)
+        scroll.setWidget(container)
+        dock.setWidget(scroll)
+        dock.setMinimumWidth(310)
 
     def _build_statusbar(self):
-        self.statusBar().showMessage("就绪 — 在画布上按住左键画轨迹")
+        sb = self.statusBar()
+        self._lbl_status = QtWidgets.QLabel("就绪 — 在画布上按住左键画轨迹")
+        sb.addWidget(self._lbl_status, 1)
+        # 右侧：鼠标坐标显示
+        self._lbl_coord = QtWidgets.QLabel("X: --  Y: --")
+        self._lbl_coord.setStyleSheet("color: #666; padding-right: 8px; font-family: monospace;")
+        sb.addPermanentWidget(self._lbl_coord)
 
     def _wire_signals(self):
         self.sp_field_w.valueChanged.connect(self._on_field_size_changed)
         self.sp_field_h.valueChanged.connect(self._on_field_size_changed)
         self.scene.selectionChanged.connect(self._on_selection_changed)
         self.scene.path_finalized.connect(self._on_path_finalized)
+        self.scene.mouse_pos_cm.connect(self._on_mouse_pos)
         self.sp_obs_w.valueChanged.connect(self._on_obs_size_changed)
         self.sp_obs_h.valueChanged.connect(self._on_obs_size_changed)
 
@@ -296,7 +393,10 @@ class MainWindow(QtWidgets.QMainWindow):
     def _on_path_finalized(self):
         n_raw = len(self.scene.path_item.raw_points)
         n_smooth = len(self.scene.path_item.smoothed_points)
-        self.statusBar().showMessage("绘制完成 — 原始 %d 点 / 平滑 %d 点" % (n_raw, n_smooth))
+        self._lbl_status.setText("绘制完成 — 原始 %d 点 / 平滑 %d 点" % (n_raw, n_smooth))
+
+    def _on_mouse_pos(self, x, y):
+        self._lbl_coord.setText("X: %6.1f  Y: %6.1f cm" % (x, y))
 
     def _on_selection_changed(self):
         sel = [it for it in self.scene.selectedItems() if isinstance(it, ObstacleItem)]
@@ -357,7 +457,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self.scene.clear_obstacles()
         self._current_file = None
         self._refresh_title()
-        self.statusBar().showMessage("已新建")
+        self._lbl_status.setText("已新建")
 
     def on_save(self):
         path = self.scene.path_item
@@ -374,7 +474,7 @@ class MainWindow(QtWidgets.QMainWindow):
             return
         self._current_file = saved
         self._refresh_title()
-        self.statusBar().showMessage("已保存: %s" % saved)
+        self._lbl_status.setText("已保存: %s" % saved)
 
     def on_open(self):
         TRAJECTORIES_DIR.mkdir(parents=True, exist_ok=True)
@@ -391,7 +491,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self._apply_payload(data)
         self._current_file = Path(path)
         self._refresh_title()
-        self.statusBar().showMessage("已导入: %s" % path)
+        self._lbl_status.setText("已导入: %s" % path)
 
     def on_export(self):
         path = self.scene.path_item
@@ -413,6 +513,7 @@ class MainWindow(QtWidgets.QMainWindow):
         if not self._confirm_export(sequence):
             return
         profile = self._current_profile()
+        print(f"[DEBUG] 当前选择: {profile.display_name} → {profile.file_path}")
         try:
             backup, _ = write_auto_sequence(
                 sequence,
@@ -431,7 +532,7 @@ class MainWindow(QtWidgets.QMainWindow):
             "已写入 %s\n共 %d 步 | AUTO_RAMP_MS=%d\n备份: %s" % (
                 profile.file_path.name, len(sequence), self.sp_ramp_ms.value(), backup.name),
         )
-        self.statusBar().showMessage("导出完成 — %d 步 → %s" % (len(sequence), profile.file_path.name))
+        self._lbl_status.setText("导出完成 — %d 步 → %s" % (len(sequence), profile.file_path.name))
 
     def on_calibration_export(self):
         """生成 2 秒前进的测试段，让用户实测距离反算速度"""

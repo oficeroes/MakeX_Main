@@ -145,7 +145,19 @@ MECANUM_X_PROFILE = ChassisProfile(
     ),
 )
 
-CHASSIS_PROFILES = [OMNI3_PROFILE, MECANUM_X_PROFILE]
+MECANUM_DRIVE_PROFILE = ChassisProfile(
+    profile_id="mecanum_drive",
+    display_name="麦克纳姆竞赛车（含收球 / 滚球）",
+    file_name="mecanum_drive.py",
+    wheel_count=4,
+    has_face_concept=False,
+    description=(
+        "X 型麦克纳姆底盘 + M5 滚球电机 + DC1/DC2 收球电机。"
+        "运动学与 mecanum_x 相同；N1-N4 键用于执行机构，+ 键触发自动程序。"
+    ),
+)
+
+CHASSIS_PROFILES = [OMNI3_PROFILE, MECANUM_X_PROFILE, MECANUM_DRIVE_PROFILE]
 
 # 默认选中第一个
 DEFAULT_PROFILE_ID = OMNI3_PROFILE.profile_id

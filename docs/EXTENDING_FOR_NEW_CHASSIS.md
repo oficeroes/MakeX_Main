@@ -155,3 +155,4 @@ AUTO_SEQUENCE 的 `(duration, Vx, Vy, omega)` 格式与底盘无关。
 |------------|--------------|------|------|-----------|
 | `omni3` | 三轮全向（120° 对称）| `mecanum_forward.py` | 3 | ✓ |
 | `mecanum_x` | X 型麦克纳姆（4 轮）| `mecanum_X_forward.py` | 4 | ✗ |
+| `mecanum_drive` | 麦克纳姆竞赛车（含收球/滚球）| `mecanum_drive.py` | 4 | ✗ |

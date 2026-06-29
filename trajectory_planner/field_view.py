@@ -58,6 +58,7 @@ class FieldScene(QtWidgets.QGraphicsScene):
 
     path_finalized = QtCore.pyqtSignal()   # 鼠标抬起后发射
     obstacles_changed = QtCore.pyqtSignal()  # 障碍物增删/几何变化
+    mouse_pos_cm = QtCore.pyqtSignal(float, float)  # 鼠标在场景中的 (x_cm, y_cm)
 
     def __init__(self, width_cm, height_cm, parent=None):
         super().__init__(parent)
@@ -261,8 +262,9 @@ class FieldView(QtWidgets.QGraphicsView):
         super().mousePressEvent(event)
 
     def mouseMoveEvent(self, event):
+        scene_pos = self.mapToScene(event.pos())
+        self.scene().mouse_pos_cm.emit(scene_pos.x(), scene_pos.y())
         if event.buttons() & QtCore.Qt.LeftButton and self.scene()._drawing:
-            scene_pos = self.mapToScene(event.pos())
             self.scene().extend_path(scene_pos)
             event.accept()
             return
