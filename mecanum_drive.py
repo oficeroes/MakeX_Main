@@ -15,6 +15,7 @@
   执行机构 —
     - DC1 / DC2 — 直流电机（收球），接动力扩展板
     - M5 — 编码电机（滚球）
+    - BL1 / BL2 — 无刷电机，接动力扩展板
 
 操控速查：
   ┌────────────┬──────────────────────┐
@@ -107,9 +108,13 @@ LED_INDEX = "INDEX1"        # 端口链上的序号
 
 # 调试模式配置
 DEBUG_TEST_SPEED = 50        # 调试模式中电机测试速度
-DEBUG_MOTOR_TYPES = ["编码电机", "直流电机"]       # 电机类型名称
-DEBUG_MOTOR_NAMES = ["M1", "M2", "M3", "M4", "M5"]  # 编码电机编号
-DEBUG_DC_NAMES = ["DC1", "DC2"]                    # 直流电机编号
+DEBUG_MOTOR_TYPES = ["编码电机", "直流电机", "无刷电机"]  # 电机类型名称
+DEBUG_MOTOR_NAMES = ["M1", "M2", "M3", "M4", "M5"]     # 编码电机编号
+DEBUG_DC_NAMES = ["DC1", "DC2"]                        # 直流电机编号
+DEBUG_BLDC_NAMES = ["BL1", "BL2"]                      # 无刷电机编号（动力扩展板）
+
+# 调试模式统一名称查找表（按类型索引：0=编码, 1=直流, 2=无刷）
+DEBUG_ALL_NAMES = [DEBUG_MOTOR_NAMES, DEBUG_DC_NAMES, DEBUG_BLDC_NAMES]
 
 # ==================== 自动程序配置 ====================
 AUTO_SPEED = 50            # 自动程序默认速度（0~100）
@@ -204,6 +209,8 @@ def stop_all_motors():
     __motor_M5.set_power(0)
     power_expand_board.set_power(DC_COLLECTOR_PORT1, 0)
     power_expand_board.set_power(DC_COLLECTOR_PORT2, 0)
+    power_expand_board.stop("BL1")
+    power_expand_board.stop("BL2")
 
 
 def debug_stop_motor():
@@ -211,9 +218,12 @@ def debug_stop_motor():
     if debug_motor_type == 0:  # 编码电机
         motor = [__motor_M1, __motor_M2, __motor_M3, __motor_M4, __motor_M5][debug_motor_index]
         motor.set_power(0)
-    else:  # 直流电机
+    elif debug_motor_type == 1:  # 直流电机
         port = [DC_COLLECTOR_PORT1, DC_COLLECTOR_PORT2][debug_motor_index]
         power_expand_board.set_power(port, 0)
+    else:  # 无刷电机
+        port = ["BL1", "BL2"][debug_motor_index]
+        power_expand_board.stop(port)
 
 # ==================== 启动确认 ====================
 # 收球 / 滚球状态（三态: 1=正转, -1=反转, 0=停止）
@@ -232,6 +242,7 @@ auto_prev_omega = 0.0
 debug_mode = False            # 当前是否在调试模式（≡ 键切换）
 debug_motor_type = 0          # 0=编码电机, 1=直流电机
 debug_motor_index = 0         # 编码:0-4(M1-M5), 直流:0-1(DC1-DC2)
+debug_show_speed_until = 0.0  # 速度显示截止时刻（秒），0=不显示
 
 # 按键边沿检测变量
 last_N1 = False
@@ -323,6 +334,8 @@ while True:
         cur_Left = gamepad.is_key_pressed("Left")
         cur_Right = gamepad.is_key_pressed("Right")
         cur_N1 = gamepad.is_key_pressed("N1")
+        cur_N2 = gamepad.is_key_pressed("N2")
+        cur_N3 = gamepad.is_key_pressed("N3")
         cur_N4 = gamepad.is_key_pressed("N4")
         cur_Menu = gamepad.is_key_pressed("≡")
 
@@ -343,53 +356,70 @@ while True:
         if cur_Up and not last_Up:
             debug_motor_type = (debug_motor_type + 1) % len(DEBUG_MOTOR_TYPES)
             print(">>> 电机类型: %s" % DEBUG_MOTOR_TYPES[debug_motor_type])
-            max_idx = len(DEBUG_MOTOR_NAMES) - 1 if debug_motor_type == 0 else len(DEBUG_DC_NAMES) - 1
+            max_idx = len(DEBUG_ALL_NAMES[debug_motor_type]) - 1
             if debug_motor_index > max_idx:
                 debug_motor_index = 0
-            name = DEBUG_MOTOR_NAMES[debug_motor_index] if debug_motor_type == 0 else DEBUG_DC_NAMES[debug_motor_index]
+            name = DEBUG_ALL_NAMES[debug_motor_type][debug_motor_index]
             __led.show(name)
         if cur_Down and not last_Down:
             debug_motor_type = (debug_motor_type - 1) % len(DEBUG_MOTOR_TYPES)
             print(">>> 电机类型: %s" % DEBUG_MOTOR_TYPES[debug_motor_type])
-            max_idx = len(DEBUG_MOTOR_NAMES) - 1 if debug_motor_type == 0 else len(DEBUG_DC_NAMES) - 1
+            max_idx = len(DEBUG_ALL_NAMES[debug_motor_type]) - 1
             if debug_motor_index > max_idx:
                 debug_motor_index = 0
-            name = DEBUG_MOTOR_NAMES[debug_motor_index] if debug_motor_type == 0 else DEBUG_DC_NAMES[debug_motor_index]
+            name = DEBUG_ALL_NAMES[debug_motor_type][debug_motor_index]
             __led.show(name)
 
         # --- 十字键 ←/→：切换电机编号 ---
-        max_idx = len(DEBUG_MOTOR_NAMES) - 1 if debug_motor_type == 0 else len(DEBUG_DC_NAMES) - 1
+        max_idx = len(DEBUG_ALL_NAMES[debug_motor_type]) - 1
         if cur_Left and not last_Left:
             debug_motor_index = (debug_motor_index - 1) % (max_idx + 1)
-            name = DEBUG_MOTOR_NAMES[debug_motor_index] if debug_motor_type == 0 else DEBUG_DC_NAMES[debug_motor_index]
+            name = DEBUG_ALL_NAMES[debug_motor_type][debug_motor_index]
             print(">>> 电机编号: %s" % name)
             __led.show(name)
         if cur_Right and not last_Right:
             debug_motor_index = (debug_motor_index + 1) % (max_idx + 1)
-            name = DEBUG_MOTOR_NAMES[debug_motor_index] if debug_motor_type == 0 else DEBUG_DC_NAMES[debug_motor_index]
+            name = DEBUG_ALL_NAMES[debug_motor_type][debug_motor_index]
             print(">>> 电机编号: %s" % name)
             __led.show(name)
 
-        # --- 空闲时屏幕显示当前电机 ---
+        # --- 空闲时屏幕显示：调速度后 2 秒内显示速度，否则显示当前电机 ---
         if not cur_N1 and not cur_N4:
-            if debug_motor_type == 0:
-                __led.show(DEBUG_MOTOR_NAMES[debug_motor_index])
+            if debug_show_speed_until > 0 and novapi.timer() < debug_show_speed_until:
+                __led.show("S%d" % DEBUG_TEST_SPEED)
             else:
-                __led.show(DEBUG_DC_NAMES[debug_motor_index])
+                __led.show(DEBUG_ALL_NAMES[debug_motor_type][debug_motor_index])
 
-        # --- N1 / N4：正转 / 反转测试 ---
+        # --- N1 / N4：正转 / 反转测试（无刷电机不支持反转，N4=停）---
         if cur_N1:
             speed = DEBUG_TEST_SPEED
         elif cur_N4:
-            speed = -DEBUG_TEST_SPEED
+            if debug_motor_type == 2:  # 无刷电机：反转=停止
+                speed = 0
+            else:
+                speed = -DEBUG_TEST_SPEED
         else:
             speed = 0
+
+        # --- N2 / N3：调节测试速度（±10，范围 10~100，无刷最低0）---
+        if cur_N2 and not last_N2:
+            DEBUG_TEST_SPEED = min(100, DEBUG_TEST_SPEED + 10)
+            debug_show_speed_until = novapi.timer() + 2.0
+            print(">>> 测试速度: %d" % DEBUG_TEST_SPEED)
+        if cur_N3 and not last_N3:
+            min_spd = 0 if debug_motor_type == 2 else 10
+            DEBUG_TEST_SPEED = max(min_spd, DEBUG_TEST_SPEED - 10)
+            debug_show_speed_until = novapi.timer() + 2.0
+            print(">>> 测试速度: %d" % DEBUG_TEST_SPEED)
 
         if debug_motor_type == 0:  # 编码电机
             motor = [__motor_M1, __motor_M2, __motor_M3, __motor_M4, __motor_M5][debug_motor_index]
             motor.set_power(speed)
-        else:  # 直流电机
+        elif debug_motor_type == 1:  # 直流电机
             port = [DC_COLLECTOR_PORT1, DC_COLLECTOR_PORT2][debug_motor_index]
+            power_expand_board.set_power(port, speed)
+        else:  # 无刷电机 (BL1/BL2)
+            port = ["BL1", "BL2"][debug_motor_index]
             power_expand_board.set_power(port, speed)
 
         # 更新边沿
@@ -398,6 +428,8 @@ while True:
         last_Left = cur_Left
         last_Right = cur_Right
         last_N1 = cur_N1
+        last_N2 = cur_N2
+        last_N3 = cur_N3
         last_N4 = cur_N4
         last_Menu = cur_Menu
 
@@ -458,7 +490,8 @@ while True:
             print("=" * 40)
             print("  >>> 进入调试模式！")
             print("  ↑↓ 切换电机类型 | ← → 切换电机编号")
-            print("  N1=正转  N4=反转  |  ≡ =退出")
+            print("  编码/直流/无刷 | N1=正转 N4=反转(无刷=停) | ≡ =退出")
+            print("  N2=速度+10 | N3=速度-10 | 无刷最低0 (当前:%d)" % DEBUG_TEST_SPEED)
             print("=" * 40)
             __led.show("M1")
         last_Menu = cur_Menu
