@@ -16,6 +16,7 @@
     - DC1 / DC2 — 直流电机（收球），接动力扩展板
     - M5 — 编码电机（滚球）
     - BL1 / BL2 — 无刷电机，接动力扩展板
+    - SV1 / SV2 — 智能舵机，M6口串联（INDEX1/INDEX2）
 
 操控速查：
   ┌────────────┬──────────────────────┐
@@ -83,6 +84,7 @@ from mbuild import gamepad
 from mbuild import power_expand_board
 from mbuild.encoder_motor import encoder_motor_class
 from mbuild.led_matrix import led_matrix_class
+from mbuild.smartservo import smartservo_class
 
 # ==================== 配置常量 ====================
 SPEED_SCALE = 0.6       # 全局速度倍率 (0~1)，安全起见默认 60%
@@ -97,10 +99,19 @@ INVERT_OMEGA = True     # True = 旋转取反
 # 收球直流电机配置
 DC_COLLECTOR_PORT1 = "DC1"   # 收球电机 1（动力扩展板通道 1）
 DC_COLLECTOR_PORT2 = "DC2"   # 收球电机 2（动力扩展板通道 2）
+DC_COLLECTOR_PORT3 = "DC3"   # 收球电机 3（动力扩展板通道 3）
 DC_COLLECTOR_SPEED = 100     # 收球最大速度（正转收球）
 
 # 滚球编码电机配置
 ROLLER_SPEED = 80            # 滚球电机默认速度（0~100）
+
+# 舵机动作配置（L1+R1 触发 — 无刷预转 + 快速拨球开关）
+BL_ACTION_SPEED = 80          # 无刷电机目标速度（0~100，BL1/BL2同时启动）
+BL_SPINUP_DELAY = 0.1         # 无刷启动后等待多久再开门（秒）
+SERVO1_ACTION_ANGLE = -40     # SV1 开门角度（度，负=反向）
+SERVO2_ACTION_ANGLE = 40      # SV2 开门角度（度，正=正向）
+SERVO_ACTION_SPEED = 50       # 舵机动作转速（rpm，1~50）
+SERVO_RETURN_DELAY = 0.12     # 开门后多久关门（秒）
 
 # 8x16 LED 点阵屏配置（横屏：16列 × 8行）
 LED_PORT = "PORT2"          # 点阵屏连接的 PORT 口（PORT1~PORT4）
@@ -108,13 +119,16 @@ LED_INDEX = "INDEX1"        # 端口链上的序号
 
 # 调试模式配置
 DEBUG_TEST_SPEED = 50        # 调试模式中电机测试速度
-DEBUG_MOTOR_TYPES = ["编码电机", "直流电机", "无刷电机"]  # 电机类型名称
+DEBUG_SERVO_ANGLE = 90       # 舵机测试目标角度（度）
+SERVO_MOVE_SPEED = 30        # 舵机转动转速（rpm，1~50）
+DEBUG_MOTOR_TYPES = ["编码电机", "直流电机", "无刷电机", "舵机"]  # 电机类型名称
 DEBUG_MOTOR_NAMES = ["M1", "M2", "M3", "M4", "M5"]     # 编码电机编号
 DEBUG_DC_NAMES = ["DC1", "DC2"]                        # 直流电机编号
 DEBUG_BLDC_NAMES = ["BL1", "BL2"]                      # 无刷电机编号（动力扩展板）
+DEBUG_SERVO_NAMES = ["SV1", "SV2"]                     # 舵机编号（M3口串联）
 
-# 调试模式统一名称查找表（按类型索引：0=编码, 1=直流, 2=无刷）
-DEBUG_ALL_NAMES = [DEBUG_MOTOR_NAMES, DEBUG_DC_NAMES, DEBUG_BLDC_NAMES]
+# 调试模式统一名称查找表（按类型索引：0=编码, 1=直流, 2=无刷, 3=舵机）
+DEBUG_ALL_NAMES = [DEBUG_MOTOR_NAMES, DEBUG_DC_NAMES, DEBUG_BLDC_NAMES, DEBUG_SERVO_NAMES]
 
 # ==================== 自动程序配置 ====================
 AUTO_SPEED = 50            # 自动程序默认速度（0~100）
@@ -152,6 +166,8 @@ __motor_M3 = encoder_motor_class("M3", "INDEX1")
 __motor_M4 = encoder_motor_class("M4", "INDEX1")
 __motor_M5 = encoder_motor_class("M5", "INDEX1")  # 滚球电机
 __led = led_matrix_class(LED_PORT, LED_INDEX)      # 8x16 点阵屏
+__servo_1 = smartservo_class("M6", "INDEX1")       # 舵机 1（M6口串联）
+__servo_2 = smartservo_class("M6", "INDEX2")       # 舵机 2（M6口串联）
 
 # ==================== 运动学函数 ====================
 def mecanum_kinematics(Vx, Vy, omega):
@@ -209,8 +225,11 @@ def stop_all_motors():
     __motor_M5.set_power(0)
     power_expand_board.set_power(DC_COLLECTOR_PORT1, 0)
     power_expand_board.set_power(DC_COLLECTOR_PORT2, 0)
+    power_expand_board.set_power(DC_COLLECTOR_PORT3, 0)
     power_expand_board.stop("BL1")
     power_expand_board.stop("BL2")
+    __servo_1.set_power(0)
+    __servo_2.set_power(0)
 
 
 def debug_stop_motor():
@@ -221,14 +240,17 @@ def debug_stop_motor():
     elif debug_motor_type == 1:  # 直流电机
         port = [DC_COLLECTOR_PORT1, DC_COLLECTOR_PORT2][debug_motor_index]
         power_expand_board.set_power(port, 0)
-    else:  # 无刷电机
+    elif debug_motor_type == 2:  # 无刷电机
         port = ["BL1", "BL2"][debug_motor_index]
         power_expand_board.stop(port)
+    else:  # 舵机
+        servo = [__servo_1, __servo_2][debug_motor_index]
+        servo.set_power(0)
 
 # ==================== 启动确认 ====================
-# 收球 / 滚球状态（三态: 1=正转, -1=反转, 0=停止）
-dc_state = 0          # DC1+DC2 收球电机状态
-roller_state = 0      # M5 滚球电机状态
+# 正常模式状态：无刷电机开关
+bl1_on = False                # BL1 状态（R2 切换）
+bl2_on = False                # BL2 状态（L2 切换）
 
 # 自动程序运行时状态
 auto_mode = False
@@ -243,28 +265,51 @@ debug_mode = False            # 当前是否在调试模式（≡ 键切换）
 debug_motor_type = 0          # 0=编码电机, 1=直流电机
 debug_motor_index = 0         # 编码:0-4(M1-M5), 直流:0-1(DC1-DC2)
 debug_show_speed_until = 0.0  # 速度显示截止时刻（秒），0=不显示
+debug_show_ok = False         # True=正在显示 OK（零点确认）
+servo_dir = 1                 # 舵机方向: 1=正向, -1=反向
 
-# 按键边沿检测变量
+# 正常模式：舵机独立发射序列（L1=SV1, R1=SV2）
+sv1_phase = 0                 # 0=空闲, 1=等待关门
+sv1_time = 0.0
+sv2_phase = 0
+sv2_time = 0.0
+
+# 正常模式状态：M5 滚球电机开关
+m5_speed = 0                  # M5 当前速度: 0 / 100 / -100
+dc3_state = 0                 # DC3 状态（N1=正, N4=反）: 1/-1/0
+
+# 按键边沿检测变量（正常模式）
 last_N1 = False
 last_N2 = False
 last_N3 = False
 last_N4 = False
 last_Plus = False
 last_Menu = False
+last_L1 = False
+last_R1 = False
+last_L2 = False
+last_R2 = False
+last_Dpad_Up = False
+last_Dpad_Down = False
+last_Dpad_Left = False
+last_Dpad_Right = False
 
 # 调试模式按键边沿变量
 last_Up = False
 last_Down = False
 last_Left = False
 last_Right = False
+last_R1 = False
+last_L1 = False
 
 print("=" * 40)
 print("  麦克纳姆轮机器人已启动！")
 print("  左摇杆 → 全向移动")
 print("  右摇杆 ←→ 自旋")
-print("  N1 → M5 滚球正转  |  N4 → M5 滚球反转")
-print("  N2 → DC 收球正转  |  N3 → DC 收球反转")
-print("  (同组按键互斥：按另一方向=取消)")
+print("  ↑↓ → M5 +/-100  |  ←→ → M5 停")
+print("  N1/N4 → DC3 +/-100  |  R2 → BL1 开关  |  L2 → BL2 开关")
+print("  L1 → SV1 发射  |  R1 → SV2 发射")
+print("  N2/N3 → 无刷速度 ±10")
 print("  ≡ 键 → 调试模式开关")
 print("  方向校准: VX=%s VY=%s ω=%s" %
       ("反" if INVERT_VX else "正",
@@ -283,7 +328,44 @@ while True:
     # ================================================================
     if auto_mode:
         elapsed = novapi.timer() - auto_step_start
-        step_duration, step_Vx, step_Vy, step_omega = AUTO_SEQUENCE[auto_step]
+        step = AUTO_SEQUENCE[auto_step]
+
+        # ---- 标记命令元组（首元素为字符串）----
+        if isinstance(step[0], str):
+            tag = step[0]
+            if tag == "servo":
+                _, sv_id, angle, speed, wait_ms = step
+                if elapsed < AUTO_STEP_DELAY * 1.5:   # 首次进入：发指令
+                    sv = __servo_1 if sv_id in ("S1", "SV1") else __servo_2
+                    sv.move_to(angle, speed)
+                    print(">>> 舵机 %s → %d°  等待 %dms" % (sv_id, angle, wait_ms))
+                if elapsed * 1000.0 >= wait_ms:
+                    auto_step += 1
+                    if auto_step >= len(AUTO_SEQUENCE):
+                        auto_mode = False
+                        auto_step = 0
+                        print(">>> 自动程序完成，恢复遥控")
+                    else:
+                        auto_step_start = novapi.timer()
+            elif tag == "delay":
+                dur = step[1]
+                if elapsed >= dur:
+                    auto_step += 1
+                    if auto_step >= len(AUTO_SEQUENCE):
+                        auto_mode = False
+                        auto_step = 0
+                        print(">>> 自动程序完成，恢复遥控")
+                    else:
+                        auto_step_start = novapi.timer()
+            else:
+                # 未知标记：跳过
+                auto_step += 1
+                auto_step_start = novapi.timer()
+            time.sleep(AUTO_STEP_DELAY)
+            continue
+
+        # ---- 标准运动 4 元组 ----
+        step_duration, step_Vx, step_Vy, step_omega = step
 
         if elapsed >= step_duration:
             auto_prev_Vx = step_Vx
@@ -303,9 +385,11 @@ while True:
                 print(">>> 自动程序完成，恢复遥控")
             else:
                 auto_step_start = novapi.timer()
-                nd, nVx, nVy, nw = AUTO_SEQUENCE[auto_step]
-                print(">>> 自动步骤 %d/%d: Vx=%d Vy=%d w=%d (%.1fs)" %
-                      (auto_step + 1, len(AUTO_SEQUENCE), nVx, nVy, nw, nd))
+                nstep = AUTO_SEQUENCE[auto_step]
+                if not isinstance(nstep[0], str):
+                    nd, nVx, nVy, nw = nstep
+                    print(">>> 自动步骤 %d/%d: Vx=%d Vy=%d w=%d (%.1fs)" %
+                          (auto_step + 1, len(AUTO_SEQUENCE), nVx, nVy, nw, nd))
         else:
             if AUTO_RAMP_MS > 0 and elapsed * 1000.0 < AUTO_RAMP_MS:
                 alpha = elapsed * 1000.0 / AUTO_RAMP_MS
@@ -338,6 +422,8 @@ while True:
         cur_N3 = gamepad.is_key_pressed("N3")
         cur_N4 = gamepad.is_key_pressed("N4")
         cur_Menu = gamepad.is_key_pressed("≡")
+        cur_R1 = gamepad.is_key_pressed("R1")
+        cur_L1 = gamepad.is_key_pressed("L1")
 
         # --- ≡ 键切换：退出调试模式 ---
         if cur_Menu and not last_Menu:
@@ -349,6 +435,7 @@ while True:
             last_Up = last_Down = last_Left = last_Right = False
             last_N1 = last_N2 = last_N3 = last_N4 = False
             last_Menu = cur_Menu
+            debug_show_ok = False
             time.sleep(0.3)
             continue
 
@@ -383,34 +470,82 @@ while True:
             print(">>> 电机编号: %s" % name)
             __led.show(name)
 
-        # --- 空闲时屏幕显示：调速度后 2 秒内显示速度，否则显示当前电机 ---
+        # --- 空闲时屏幕显示：OK优先，然后舵机角度/速度，最后电机名 ---
         if not cur_N1 and not cur_N4:
-            if debug_show_speed_until > 0 and novapi.timer() < debug_show_speed_until:
-                __led.show("S%d" % DEBUG_TEST_SPEED)
+            if debug_show_ok:
+                if novapi.timer() < debug_show_speed_until:
+                    pass  # __led.show("OK") 已在 R1 中设置，保持 1 秒
+                else:
+                    debug_show_ok = False  # OK 超时，恢复常规显示
+            elif debug_show_speed_until > 0 and novapi.timer() < debug_show_speed_until:
+                if debug_motor_type == 3:
+                    __led.show("A%d" % DEBUG_SERVO_ANGLE)
+                else:
+                    __led.show("S%d" % DEBUG_TEST_SPEED)
             else:
                 __led.show(DEBUG_ALL_NAMES[debug_motor_type][debug_motor_index])
 
-        # --- N1 / N4：正转 / 反转测试（无刷电机不支持反转，N4=停）---
-        if cur_N1:
-            speed = DEBUG_TEST_SPEED
-        elif cur_N4:
-            if debug_motor_type == 2:  # 无刷电机：反转=停止
-                speed = 0
+        # --- N1 / N4：舵机用 move_to 角度控制（边沿触发，一次到位）---
+        servo_moved = False  # 舵机已执行 move_to，跳过后续 set_power
+        if debug_motor_type == 3:
+            # 舵机：边沿触发，始终跳过 set_power（避免干扰 move_to）
+            servo_moved = True
+            if cur_N1 and not last_N1:
+                servo = [__servo_1, __servo_2][debug_motor_index]
+                servo.move_to(servo_dir * DEBUG_SERVO_ANGLE, SERVO_MOVE_SPEED)
+                print(">>> 舵机 → %d°" % (servo_dir * DEBUG_SERVO_ANGLE))
+            elif cur_N4 and not last_N4:
+                servo = [__servo_1, __servo_2][debug_motor_index]
+                servo.move_to(0, SERVO_MOVE_SPEED)
+                print(">>> 舵机 → 0°")
             else:
-                speed = -DEBUG_TEST_SPEED
+                speed = 0
         else:
-            speed = 0
+            # 其他电机：连续触发（按住一直转）
+            if cur_N1:
+                speed = DEBUG_TEST_SPEED
+            elif cur_N4:
+                if debug_motor_type == 2:  # 无刷电机：反转=停止
+                    speed = 0
+                else:
+                    speed = -DEBUG_TEST_SPEED
+            else:
+                speed = 0
 
-        # --- N2 / N3：调节测试速度（±10，范围 10~100，无刷最低0）---
+        # --- N2 / N3：调节速度（±10）或舵机角度（±5°）---
         if cur_N2 and not last_N2:
-            DEBUG_TEST_SPEED = min(100, DEBUG_TEST_SPEED + 10)
-            debug_show_speed_until = novapi.timer() + 2.0
-            print(">>> 测试速度: %d" % DEBUG_TEST_SPEED)
+            if debug_motor_type == 3:  # 舵机：加角度
+                DEBUG_SERVO_ANGLE = min(360, DEBUG_SERVO_ANGLE + 5)
+                debug_show_speed_until = novapi.timer() + 2.0
+                print(">>> 目标角度: %d°" % DEBUG_SERVO_ANGLE)
+            else:
+                DEBUG_TEST_SPEED = min(100, DEBUG_TEST_SPEED + 10)
+                debug_show_speed_until = novapi.timer() + 2.0
+                print(">>> 测试速度: %d" % DEBUG_TEST_SPEED)
         if cur_N3 and not last_N3:
-            min_spd = 0 if debug_motor_type == 2 else 10
-            DEBUG_TEST_SPEED = max(min_spd, DEBUG_TEST_SPEED - 10)
-            debug_show_speed_until = novapi.timer() + 2.0
-            print(">>> 测试速度: %d" % DEBUG_TEST_SPEED)
+            if debug_motor_type == 3:  # 舵机：减角度
+                DEBUG_SERVO_ANGLE = max(0, DEBUG_SERVO_ANGLE - 5)
+                debug_show_speed_until = novapi.timer() + 2.0
+                print(">>> 目标角度: %d°" % DEBUG_SERVO_ANGLE)
+            else:
+                DEBUG_TEST_SPEED = max(0, DEBUG_TEST_SPEED - 10)
+                debug_show_speed_until = novapi.timer() + 2.0
+                print(">>> 测试速度: %d" % DEBUG_TEST_SPEED)
+
+        # --- R1：舵机模式下设定当前角度为零点 ---
+        if debug_motor_type == 3 and cur_R1 and not last_R1:
+            servo = [__servo_1, __servo_2][debug_motor_index]
+            servo.set_zero()
+            __led.show("OK")
+            print(">>> 舵机零点已设定!")
+            debug_show_speed_until = novapi.timer() + 1.0  # OK 显示 1 秒
+            debug_show_ok = True
+            servo_moved = True  # 跳过 set_power
+
+        # --- L1：舵机模式下切换转动方向 ---
+        if debug_motor_type == 3 and cur_L1 and not last_L1:
+            servo_dir = -servo_dir
+            print(">>> 舵机方向: %s" % ("正向" if servo_dir == 1 else "反向"))
 
         if debug_motor_type == 0:  # 编码电机
             motor = [__motor_M1, __motor_M2, __motor_M3, __motor_M4, __motor_M5][debug_motor_index]
@@ -418,9 +553,13 @@ while True:
         elif debug_motor_type == 1:  # 直流电机
             port = [DC_COLLECTOR_PORT1, DC_COLLECTOR_PORT2][debug_motor_index]
             power_expand_board.set_power(port, speed)
-        else:  # 无刷电机 (BL1/BL2)
+        elif debug_motor_type == 2:  # 无刷电机 (BL1/BL2)
             port = ["BL1", "BL2"][debug_motor_index]
             power_expand_board.set_power(port, speed)
+        else:  # 舵机 (SV1/SV2)
+            servo = [__servo_1, __servo_2][debug_motor_index]
+            if not servo_moved:
+                servo.set_power(speed)
 
         # 更新边沿
         last_Up = cur_Up
@@ -432,6 +571,8 @@ while True:
         last_N3 = cur_N3
         last_N4 = cur_N4
         last_Menu = cur_Menu
+        last_R1 = cur_R1
+        last_L1 = cur_L1
 
         time.sleep(LOOP_DELAY)
         continue  # 跳过正常模式
@@ -462,13 +603,21 @@ while True:
     # --- 4. 运动学解算 ---
     M1_power, M2_power, M3_power, M4_power = mecanum_kinematics(Vx, Vy, omega)
 
-    # --- 5. 按键边沿触发（收球 / 滚球 / 自动程序 / 调试）---
+    # --- 5. 按键边沿触发（M5 / 无刷 / 舵机 / 自动程序）---
     cur_N1 = gamepad.is_key_pressed("N1")
     cur_N2 = gamepad.is_key_pressed("N2")
     cur_N3 = gamepad.is_key_pressed("N3")
     cur_N4 = gamepad.is_key_pressed("N4")
     cur_Plus = gamepad.is_key_pressed("+")
     cur_Menu = gamepad.is_key_pressed("≡")
+    cur_L1 = gamepad.is_key_pressed("L1")
+    cur_R1 = gamepad.is_key_pressed("R1")
+    cur_L2 = gamepad.is_key_pressed("L2")
+    cur_R2 = gamepad.is_key_pressed("R2")
+    cur_Dpad_Up = gamepad.is_key_pressed("Up")
+    cur_Dpad_Down = gamepad.is_key_pressed("Down")
+    cur_Dpad_Left = gamepad.is_key_pressed("Left")
+    cur_Dpad_Right = gamepad.is_key_pressed("Right")
 
     # ≡ 键切换：进入/退出调试模式
     if cur_Menu and not last_Menu:
@@ -490,67 +639,110 @@ while True:
             print("=" * 40)
             print("  >>> 进入调试模式！")
             print("  ↑↓ 切换电机类型 | ← → 切换电机编号")
-            print("  编码/直流/无刷 | N1=正转 N4=反转(无刷=停) | ≡ =退出")
-            print("  N2=速度+10 | N3=速度-10 | 无刷最低0 (当前:%d)" % DEBUG_TEST_SPEED)
+            print("  编码/直流/无刷/舵机 | N1=正转 N4=反转(无刷=停) | ≡ =退出")
+            print("  舵机:N1=转到目标角 N4=归零 | L1=切换方向 N2/N3=角度±5°(当前:%d°)" % DEBUG_SERVO_ANGLE)
+            print("  舵机:R1=设定当前为零点 | 其他:N2=速度+10 N3=速度-10 (当前:%d)" % DEBUG_TEST_SPEED)
             print("=" * 40)
             __led.show("M1")
         last_Menu = cur_Menu
         time.sleep(0.3)
         continue
 
-    # N1: M5 滚球正转（与 N4 反转互斥）
-    if cur_N1 and not last_N1:
-        if roller_state == 1:
-            roller_state = 0
-            __motor_M5.set_power(0)
-            print(">>> 滚球电机: 关")
-        else:
-            roller_state = 1
-            __motor_M5.set_power(ROLLER_SPEED)
-            print(">>> 滚球电机: 正转 (M5, +%d)" % ROLLER_SPEED)
+    # ---- D-pad：M5 滚球电机（开关，非按住）----
+    if cur_Dpad_Up and not last_Dpad_Up:
+        m5_speed = 100 if m5_speed != 100 else 0
+    if cur_Dpad_Down and not last_Dpad_Down:
+        m5_speed = -100 if m5_speed != -100 else 0
+    if (cur_Dpad_Left and not last_Dpad_Left) or (cur_Dpad_Right and not last_Dpad_Right):
+        m5_speed = 0
+    __motor_M5.set_power(m5_speed)
 
-    # N4: M5 滚球反转（与 N1 正转互斥）
-    if cur_N4 and not last_N4:
-        if roller_state == -1:
-            roller_state = 0
-            __motor_M5.set_power(0)
-            print(">>> 滚球电机: 关")
+    # ---- R2 / L2：无刷电机开关 ----
+    if cur_R2 and not last_R2:
+        bl1_on = not bl1_on
+        if bl1_on:
+            power_expand_board.set_power("BL1", BL_ACTION_SPEED)
+            print(">>> BL1 启动 (%d)" % BL_ACTION_SPEED)
         else:
-            roller_state = -1
-            __motor_M5.set_power(-ROLLER_SPEED)
-            print(">>> 滚球电机: 反转 (M5, -%d)" % ROLLER_SPEED)
+            power_expand_board.stop("BL1")
+            print(">>> BL1 关闭")
+    if cur_L2 and not last_L2:
+        bl2_on = not bl2_on
+        if bl2_on:
+            power_expand_board.set_power("BL2", BL_ACTION_SPEED)
+            print(">>> BL2 启动 (%d)" % BL_ACTION_SPEED)
+        else:
+            power_expand_board.stop("BL2")
+            print(">>> BL2 关闭")
 
-    # N2: DC1+DC2 收球正转（与 N3 反转互斥）
+    # ---- N2 / N3：无刷速度 ±10（BL1+BL2 共用）----
     if cur_N2 and not last_N2:
-        if dc_state == 1:
-            dc_state = 0
-            power_expand_board.set_power(DC_COLLECTOR_PORT1, 0)
-            power_expand_board.set_power(DC_COLLECTOR_PORT2, 0)
-            print(">>> 收球电机: 关")
-        else:
-            dc_state = 1
-            power_expand_board.set_power(DC_COLLECTOR_PORT1, DC_COLLECTOR_SPEED)
-            power_expand_board.set_power(DC_COLLECTOR_PORT2, DC_COLLECTOR_SPEED)
-            print(">>> 收球电机: 正转 (DC1+DC2, +%d)" % DC_COLLECTOR_SPEED)
-
-    # N3: DC1+DC2 收球反转（与 N2 正转互斥）
+        BL_ACTION_SPEED = min(100, BL_ACTION_SPEED + 10)
+        print(">>> 无刷速度: %d" % BL_ACTION_SPEED)
+        # 如果无刷正在运行，立即更新速度
+        if bl1_on:
+            power_expand_board.set_power("BL1", BL_ACTION_SPEED)
+        if bl2_on:
+            power_expand_board.set_power("BL2", BL_ACTION_SPEED)
     if cur_N3 and not last_N3:
-        if dc_state == -1:
-            dc_state = 0
-            power_expand_board.set_power(DC_COLLECTOR_PORT1, 0)
-            power_expand_board.set_power(DC_COLLECTOR_PORT2, 0)
-            print(">>> 收球电机: 关")
-        else:
-            dc_state = -1
-            power_expand_board.set_power(DC_COLLECTOR_PORT1, -DC_COLLECTOR_SPEED)
-            power_expand_board.set_power(DC_COLLECTOR_PORT2, -DC_COLLECTOR_SPEED)
-            print(">>> 收球电机: 反转 (DC1+DC2, -%d)" % DC_COLLECTOR_SPEED)
+        BL_ACTION_SPEED = max(0, BL_ACTION_SPEED - 10)
+        print(">>> 无刷速度: %d" % BL_ACTION_SPEED)
+        if bl1_on:
+            power_expand_board.set_power("BL1", BL_ACTION_SPEED)
+        if bl2_on:
+            power_expand_board.set_power("BL2", BL_ACTION_SPEED)
+
+    # ---- N1 / N4：DC3 直流电机正转/反转 ----
+    if cur_N1 and not last_N1:
+        dc3_state = 0 if dc3_state == 1 else 1
+        power_expand_board.set_power(DC_COLLECTOR_PORT3, dc3_state * DC_COLLECTOR_SPEED)
+        print(">>> DC3 %s (%d)" % ("正转" if dc3_state == 1 else "关", dc3_state * DC_COLLECTOR_SPEED))
+    if cur_N4 and not last_N4:
+        dc3_state = 0 if dc3_state == -1 else -1
+        power_expand_board.set_power(DC_COLLECTOR_PORT3, dc3_state * DC_COLLECTOR_SPEED)
+        print(">>> DC3 %s (%d)" % ("反转" if dc3_state == -1 else "关", dc3_state * DC_COLLECTOR_SPEED))
+
+    # ---- L1：SV1 发射（开门 → 延时 → 关门）----
+    if cur_L1 and not last_L1:
+        __servo_1.move_to(SERVO1_ACTION_ANGLE, SERVO_ACTION_SPEED)
+        sv1_phase = 1
+        sv1_time = novapi.timer()
+        print(">>> SV1 发射! (%d° %.0fms后关门)" % (
+            SERVO1_ACTION_ANGLE, SERVO_RETURN_DELAY * 1000))
+
+    # ---- R1：SV2 发射（开门 → 延时 → 关门）----
+    if cur_R1 and not last_R1:
+        __servo_2.move_to(SERVO2_ACTION_ANGLE, SERVO_ACTION_SPEED)
+        sv2_phase = 1
+        sv2_time = novapi.timer()
+        print(">>> SV2 发射! (%d° %.0fms后关门)" % (
+            SERVO2_ACTION_ANGLE, SERVO_RETURN_DELAY * 1000))
 
     last_N1 = cur_N1
     last_N2 = cur_N2
     last_N3 = cur_N3
     last_N4 = cur_N4
     last_Menu = cur_Menu
+    last_L1 = cur_L1
+    last_R1 = cur_R1
+    last_L2 = cur_L2
+    last_R2 = cur_R2
+    last_Dpad_Up = cur_Dpad_Up
+    last_Dpad_Down = cur_Dpad_Down
+    last_Dpad_Left = cur_Dpad_Left
+    last_Dpad_Right = cur_Dpad_Right
+
+    # ---- 舵机独立关门（SV1）----
+    if sv1_phase == 1 and novapi.timer() - sv1_time >= SERVO_RETURN_DELAY:
+        __servo_1.move_to(0, SERVO_ACTION_SPEED)
+        sv1_phase = 0
+        print(">>> SV1 关门")
+
+    # ---- 舵机独立关门（SV2）----
+    if sv2_phase == 1 and novapi.timer() - sv2_time >= SERVO_RETURN_DELAY:
+        __servo_2.move_to(0, SERVO_ACTION_SPEED)
+        sv2_phase = 0
+        print(">>> SV2 关门")
 
     # + 键：启动自动程序（边沿触发）
     if cur_Plus and not last_Plus:
@@ -570,6 +762,9 @@ while True:
     __motor_M2.set_power(M2_power)
     __motor_M3.set_power(M3_power)
     __motor_M4.set_power(M4_power)
+
+    # 正常模式：LED 常显当前无刷速度
+    __led.show("S%d" % BL_ACTION_SPEED)
 
     # --- 7. 循环延时 ---
     time.sleep(LOOP_DELAY)

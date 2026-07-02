@@ -76,6 +76,7 @@ from .kinematics import build_sequence
 from .file_io import build_payload, save_trajectory, load_trajectory, next_filename
 from .exporter import write_auto_sequence
 from .obstacle_item import ObstacleItem
+from .action_block_item import ActionBlockItem
 
 
 class MainWindow(QtWidgets.QMainWindow):
@@ -84,6 +85,8 @@ class MainWindow(QtWidgets.QMainWindow):
         self.setWindowTitle("轨迹规划器")
         self.resize(1280, 800)
         self._current_file = None
+        self._undo_stack = []   # list of payload dicts (最多 30 步)
+        self._redo_stack = []
 
         self.scene = FieldScene(DEFAULT_FIELD_WIDTH_CM, DEFAULT_FIELD_HEIGHT_CM)
         self.view = FieldView(self.scene)
@@ -120,6 +123,21 @@ class MainWindow(QtWidgets.QMainWindow):
         act_save.setToolTip("保存轨迹到 JSON (Ctrl+S)")
         act_save.setShortcut("Ctrl+S")
         act_save.triggered.connect(self.on_save)
+
+        tb.addSeparator()
+
+        # 撤销 / 重做
+        self._act_undo = tb.addAction("↩ 撤销")
+        self._act_undo.setToolTip("撤销上一步操作 (Ctrl+Z)")
+        self._act_undo.setShortcut("Ctrl+Z")
+        self._act_undo.setEnabled(False)
+        self._act_undo.triggered.connect(self.on_undo)
+
+        self._act_redo = tb.addAction("↪ 重做")
+        self._act_redo.setToolTip("重做已撤销的操作 (Ctrl+Y)")
+        self._act_redo.setShortcut("Ctrl+Y")
+        self._act_redo.setEnabled(False)
+        self._act_redo.triggered.connect(self.on_redo)
 
         tb.addSeparator()
 
@@ -165,7 +183,7 @@ class MainWindow(QtWidgets.QMainWindow):
         act_add_obs.triggered.connect(self.on_add_obstacle)
 
         act_del = tb.addAction("🗑 删除选中")
-        act_del.setToolTip("删除当前选中的障碍物 (Del)")
+        act_del.setToolTip("删除选中的路段 / 障碍物 / 执行块 (Del)")
         act_del.setShortcut("Del")
         act_del.triggered.connect(self.on_delete_selected)
 
@@ -334,6 +352,63 @@ class MainWindow(QtWidgets.QMainWindow):
         f_smooth.addRow(btn_resmooth)
         outer.addWidget(g_smooth)
 
+        # --- 动作序列 ---
+        g_seq = QtWidgets.QGroupBox("动作序列")
+        v_seq = QtWidgets.QVBoxLayout(g_seq)
+        v_seq.setSpacing(4)
+
+        # 添加按钮行
+        btn_row = QtWidgets.QWidget()
+        btn_h = QtWidgets.QHBoxLayout(btn_row)
+        btn_h.setContentsMargins(0, 0, 0, 0); btn_h.setSpacing(4)
+        btn_add_servo = QtWidgets.QPushButton("⚙ 舵机")
+        btn_add_servo.setToolTip("在最后一段路径后添加舵机动作块")
+        btn_add_servo.clicked.connect(self.on_add_servo_block)
+        btn_add_drive = QtWidgets.QPushButton("→ 直走")
+        btn_add_drive.setToolTip("在最后一段路径后添加直走 N cm 块")
+        btn_add_drive.clicked.connect(self.on_add_drive_block)
+        btn_add_delay = QtWidgets.QPushButton("⏱ 延时")
+        btn_add_delay.setToolTip("在最后一段路径后添加延时块")
+        btn_add_delay.clicked.connect(self.on_add_delay_block)
+        btn_h.addWidget(btn_add_servo)
+        btn_h.addWidget(btn_add_drive)
+        btn_h.addWidget(btn_add_delay)
+        v_seq.addWidget(btn_row)
+
+        # 序列树（路段为父节点，block 为子节点）
+        self.seq_tree = QtWidgets.QTreeWidget()
+        self.seq_tree.setHeaderHidden(True)
+        self.seq_tree.setMinimumHeight(100)
+        self.seq_tree.setMaximumHeight(200)
+        self.seq_tree.setRootIsDecorated(True)
+        self.seq_tree.setAlternatingRowColors(True)
+        v_seq.addWidget(self.seq_tree)
+
+        # 操作按钮行
+        ctrl_row = QtWidgets.QWidget()
+        ctrl_h = QtWidgets.QHBoxLayout(ctrl_row)
+        ctrl_h.setContentsMargins(0, 0, 0, 0); ctrl_h.setSpacing(4)
+        btn_edit_block = QtWidgets.QPushButton("编辑")
+        btn_edit_block.setToolTip("编辑选中的执行块")
+        btn_edit_block.clicked.connect(self.on_edit_block)
+        btn_del_block = QtWidgets.QPushButton("删除")
+        btn_del_block.setToolTip("删除选中的执行块")
+        btn_del_block.clicked.connect(self.on_delete_block)
+        btn_up_block = QtWidgets.QPushButton("↑")
+        btn_up_block.setToolTip("上移选中的执行块")
+        btn_up_block.setMaximumWidth(30)
+        btn_up_block.clicked.connect(self.on_move_block_up)
+        btn_dn_block = QtWidgets.QPushButton("↓")
+        btn_dn_block.setToolTip("下移选中的执行块")
+        btn_dn_block.setMaximumWidth(30)
+        btn_dn_block.clicked.connect(self.on_move_block_down)
+        ctrl_h.addWidget(btn_edit_block)
+        ctrl_h.addWidget(btn_del_block)
+        ctrl_h.addWidget(btn_up_block)
+        ctrl_h.addWidget(btn_dn_block)
+        v_seq.addWidget(ctrl_row)
+        outer.addWidget(g_seq)
+
         # --- 障碍物选中信息 ---
         g_obs = QtWidgets.QGroupBox("选中的障碍物")
         f_obs = QtWidgets.QFormLayout(g_obs)
@@ -384,16 +459,69 @@ class MainWindow(QtWidgets.QMainWindow):
         self.scene.mouse_pos_cm.connect(self._on_mouse_pos)
         self.sp_obs_w.valueChanged.connect(self._on_obs_size_changed)
         self.sp_obs_h.valueChanged.connect(self._on_obs_size_changed)
+        self.seq_tree.itemDoubleClicked.connect(self._on_seq_tree_double_clicked)
+        # 每段路径完成时推一个快照到撤销栈
+        self.scene.path_finalized.connect(self._push_undo)
+
+    # ---- 撤销 / 重做 ----
+    def _push_undo(self, *_):
+        """把当前状态快照压栈，清空重做栈"""
+        try:
+            snap = self._build_current_payload()
+        except Exception:
+            return
+        self._undo_stack.append(snap)
+        if len(self._undo_stack) > 30:
+            self._undo_stack.pop(0)
+        self._redo_stack.clear()
+        self._act_undo.setEnabled(True)
+        self._act_redo.setEnabled(False)
+
+    def _restore_snapshot(self, snap):
+        self._apply_payload(snap)
+        self._refresh_seq_tree()
+        self._refresh_title()
+
+    def on_undo(self):
+        if not self._undo_stack:
+            return
+        # 把当前状态推入重做栈
+        try:
+            cur = self._build_current_payload()
+            self._redo_stack.append(cur)
+        except Exception:
+            pass
+        snap = self._undo_stack.pop()
+        self._restore_snapshot(snap)
+        self._act_undo.setEnabled(bool(self._undo_stack))
+        self._act_redo.setEnabled(True)
+        self._lbl_status.setText("已撤销（还可撤销 %d 步）" % len(self._undo_stack))
+
+    def on_redo(self):
+        if not self._redo_stack:
+            return
+        try:
+            cur = self._build_current_payload()
+            self._undo_stack.append(cur)
+        except Exception:
+            pass
+        snap = self._redo_stack.pop()
+        self._restore_snapshot(snap)
+        self._act_undo.setEnabled(True)
+        self._act_redo.setEnabled(bool(self._redo_stack))
+        self._lbl_status.setText("已重做（还可重做 %d 步）" % len(self._redo_stack))
 
     # ---- 状态同步 ----
     def _on_field_size_changed(self, *_):
         self.scene.set_field_size(self.sp_field_w.value(), self.sp_field_h.value())
         self.view.fitInView(self.scene.sceneRect(), QtCore.Qt.KeepAspectRatio)
 
-    def _on_path_finalized(self):
-        n_raw = len(self.scene.path_item.raw_points)
-        n_smooth = len(self.scene.path_item.smoothed_points)
-        self._lbl_status.setText("绘制完成 — 原始 %d 点 / 平滑 %d 点" % (n_raw, n_smooth))
+    def _on_path_finalized(self, seg_idx):
+        n_raw = len(self.scene.path_segments[seg_idx].raw_points)
+        n_smooth = len(self.scene.path_segments[seg_idx].smoothed_points)
+        self._lbl_status.setText("段 %d 绘制完成 — 原始 %d 点 / 平滑 %d 点" % (
+            seg_idx + 1, n_raw, n_smooth))
+        self._refresh_seq_tree()
 
     def _on_mouse_pos(self, x, y):
         self._lbl_coord.setText("X: %6.1f  Y: %6.1f cm" % (x, y))
@@ -457,11 +585,13 @@ class MainWindow(QtWidgets.QMainWindow):
         self.scene.clear_obstacles()
         self._current_file = None
         self._refresh_title()
+        self._refresh_seq_tree()
         self._lbl_status.setText("已新建")
 
     def on_save(self):
-        path = self.scene.path_item
-        if len(path.raw_points) < 2:
+        if not self.scene.path_segments or not any(
+            len(s.raw_points) >= 2 for s in self.scene.path_segments
+        ):
             QtWidgets.QMessageBox.information(self, "保存", "还没有画轨迹，无法保存。")
             return
 
@@ -494,26 +624,19 @@ class MainWindow(QtWidgets.QMainWindow):
         self._lbl_status.setText("已导入: %s" % path)
 
     def on_export(self):
-        path = self.scene.path_item
-        if len(path.smoothed_points) < 2:
+        if not self.scene.path_segments:
             QtWidgets.QMessageBox.information(self, "导出", "请先画一条轨迹。")
             return
-        sequence = build_sequence(
-            path.smoothed_points,
-            self._current_mode(),
-            self.sp_cm_per_s.value(),
-            self.sp_deg_per_s.value(),
-            self.sp_auto_power.value(),
-            self.sp_omega_power.value(),
-            invert_x=self.chk_invert_x.isChecked(),
-            invert_y=self.chk_invert_y.isChecked(),
-            drift_left_omega=self.sp_drift_left.value(),
-            drift_right_omega=self.sp_drift_right.value(),
+        has_path = any(
+            len(seg.smoothed_points) >= 2 for seg in self.scene.path_segments
         )
+        if not has_path:
+            QtWidgets.QMessageBox.information(self, "导出", "请先画一条轨迹。")
+            return
+        sequence = self._build_combined_sequence()
         if not self._confirm_export(sequence):
             return
         profile = self._current_profile()
-        print(f"[DEBUG] 当前选择: {profile.display_name} → {profile.file_path}")
         try:
             backup, _ = write_auto_sequence(
                 sequence,
@@ -571,23 +694,173 @@ class MainWindow(QtWidgets.QMainWindow):
         obs.setSelected(True)
 
     def on_delete_selected(self):
-        for it in list(self.scene.selectedItems()):
+        """删除当前选中的项目：路段（含其执行块）/ 执行块 / 障碍物"""
+        selected = list(self.scene.selectedItems())
+        if not selected:
+            return
+        self._push_undo()   # 删除前先存快照
+
+        from .path_item import PathItem
+        for it in selected:
             if isinstance(it, ObstacleItem):
                 self.scene.remove_obstacle(it)
+            elif isinstance(it, PathItem):
+                # 找到是第几段，连同该段执行链一起删除
+                if it in self.scene.path_segments:
+                    seg_idx = self.scene.path_segments.index(it)
+                    # 删执行块
+                    for block in list(self.scene.action_chains[seg_idx]):
+                        self.scene.removeItem(block)
+                    del self.scene.action_chains[seg_idx]
+                    self.scene.removeItem(it)
+                    del self.scene.path_segments[seg_idx]
+                    self.scene._refresh_collision()
+            elif isinstance(it, ActionBlockItem):
+                # 找到属于哪段
+                for seg_idx, chain in enumerate(self.scene.action_chains):
+                    if it in chain:
+                        self.scene.remove_action_block(seg_idx, it)
+                        break
+
+        self._refresh_seq_tree()
+        self._lbl_status.setText("已删除选中项目")
 
     def on_clear_path(self):
         if not self._confirm("清空当前轨迹？"):
             return
         self.scene.clear_path()
+        self._refresh_seq_tree()
 
     def on_resmooth(self):
         self.scene.resmooth(self.sp_smooth.value(), self.sp_resample.value())
-        self._on_path_finalized()
+        self._refresh_seq_tree()
+
+    # ---- 执行块操作 ----
+    def _target_seg_idx(self):
+        """添加执行块的目标段索引：选中段，或最后一段"""
+        sel = self.seq_tree.currentItem()
+        if sel:
+            # 如果选的是 block 节点，用其父段
+            parent = sel.parent()
+            node = parent if parent else sel
+            idx = node.data(0, QtCore.Qt.UserRole)
+            if idx is not None:
+                return int(idx)
+        return len(self.scene.path_segments) - 1
+
+    def _add_block(self, action_type):
+        idx = self._target_seg_idx()
+        if idx < 0:
+            QtWidgets.QMessageBox.information(self, "提示", "请先在场地上画一段轨迹。")
+            return
+        block = ActionBlockItem(action_type)
+        if not block.open_edit_dialog(self):
+            return
+        self.scene.add_action_block(idx, block)
+        self._refresh_seq_tree()
+        self._lbl_status.setText("已添加 %s 块到路段 %d" % (block.type_label(), idx + 1))
+
+    def on_add_servo_block(self):
+        self._add_block(ActionBlockItem.TYPE_SERVO)
+
+    def on_add_drive_block(self):
+        self._add_block(ActionBlockItem.TYPE_DRIVE)
+
+    def on_add_delay_block(self):
+        self._add_block(ActionBlockItem.TYPE_DELAY)
+
+    def on_edit_block(self):
+        item = self.seq_tree.currentItem()
+        if item is None or item.parent() is None:
+            return
+        block = item.data(0, QtCore.Qt.UserRole + 1)
+        if block and block.open_edit_dialog(self):
+            item.setText(0, block.label_text())
+            self._lbl_status.setText("已更新执行块")
+
+    def on_delete_block(self):
+        item = self.seq_tree.currentItem()
+        if item is None or item.parent() is None:
+            return
+        seg_idx = int(item.parent().data(0, QtCore.Qt.UserRole))
+        block = item.data(0, QtCore.Qt.UserRole + 1)
+        self.scene.remove_action_block(seg_idx, block)
+        self._refresh_seq_tree()
+
+    def on_move_block_up(self):
+        item = self.seq_tree.currentItem()
+        if item is None or item.parent() is None:
+            return
+        seg_idx = int(item.parent().data(0, QtCore.Qt.UserRole))
+        pos = item.parent().indexOfChild(item)
+        if pos > 0:
+            self.scene.move_action_block(seg_idx, pos, pos - 1)
+            self._refresh_seq_tree()
+
+    def on_move_block_down(self):
+        item = self.seq_tree.currentItem()
+        if item is None or item.parent() is None:
+            return
+        seg_idx = int(item.parent().data(0, QtCore.Qt.UserRole))
+        pos = item.parent().indexOfChild(item)
+        chain_len = len(self.scene.action_chains[seg_idx])
+        if pos < chain_len - 1:
+            self.scene.move_action_block(seg_idx, pos, pos + 1)
+            self._refresh_seq_tree()
+
+    def _on_seq_tree_double_clicked(self, item, col):
+        if item.parent() is not None:
+            block = item.data(0, QtCore.Qt.UserRole + 1)
+            if block and block.open_edit_dialog(self):
+                item.setText(0, block.label_text())
+
+    def _refresh_seq_tree(self):
+        self.seq_tree.clear()
+        for i, seg in enumerate(self.scene.path_segments):
+            n_pts = len(seg.smoothed_points)
+            seg_item = QtWidgets.QTreeWidgetItem(
+                self.seq_tree, ["路段 %d  (%d 点)" % (i + 1, n_pts)])
+            seg_item.setData(0, QtCore.Qt.UserRole, i)
+            seg_item.setExpanded(True)
+            for block in self.scene.action_chains[i]:
+                block_item = QtWidgets.QTreeWidgetItem(seg_item, [block.label_text()])
+                block_item.setData(0, QtCore.Qt.UserRole + 1, block)
+                block_item.setForeground(0, QtGui.QBrush(block.border_color()))
+
+    # ---- 构建合并序列 ----
+    def _build_combined_sequence(self):
+        """把所有路段 + 执行块按执行顺序合并为 AUTO_SEQUENCE 元组列表"""
+        seq = []
+        cm_per_s = self.sp_cm_per_s.value()
+        deg_per_s = self.sp_deg_per_s.value()
+        auto_power = self.sp_auto_power.value()
+        omega_power = self.sp_omega_power.value()
+        mode = self._current_mode()
+        inv_x = self.chk_invert_x.isChecked()
+        inv_y = self.chk_invert_y.isChecked()
+        drift_l = self.sp_drift_left.value()
+        drift_r = self.sp_drift_right.value()
+
+        for i, seg in enumerate(self.scene.path_segments):
+            if len(seg.smoothed_points) >= 2:
+                seg_seq = build_sequence(
+                    seg.smoothed_points, mode, cm_per_s, deg_per_s,
+                    auto_power, omega_power,
+                    invert_x=inv_x, invert_y=inv_y,
+                    drift_left_omega=drift_l, drift_right_omega=drift_r,
+                    add_stop=False,
+                )
+                seq.extend(seg_seq)
+            for block in self.scene.action_chains[i]:
+                seq.extend(block.to_sequence_steps(cm_per_s, auto_power))
+
+        from .config import STOP_BUFFER
+        seq.append(STOP_BUFFER)
+        return seq
+
 
     # ---- 数据交换 ----
     def _build_current_payload(self):
-        raw = self.scene.path_item.raw_points
-        smooth = self.scene.path_item.smoothed_points
         w, h = self.scene.field_size()
         calibration = {
             "cm_per_second_at_power_50": self.sp_cm_per_s.value(),
@@ -607,7 +880,21 @@ class MainWindow(QtWidgets.QMainWindow):
             "chassis_profile_id": self._current_profile().profile_id,
         }
         obstacles = [o.to_dict() for o in self.scene.obstacles()]
-        return build_payload(w, h, calibration, settings, raw, smooth, obstacles)
+        path_segments = [
+            (seg.raw_points, seg.smoothed_points)
+            for seg in self.scene.path_segments
+        ]
+        action_chains = [
+            [block.to_dict() for block in chain]
+            for chain in self.scene.action_chains
+        ]
+        # 向后兼容：raw/smooth 传第一段（或空）
+        first_raw = path_segments[0][0] if path_segments else []
+        first_smooth = path_segments[0][1] if path_segments else []
+        return build_payload(
+            w, h, calibration, settings, first_raw, first_smooth, obstacles,
+            path_segments=path_segments, action_chains=action_chains,
+        )
 
     def _apply_payload(self, data):
         field = data.get("field", {})
@@ -640,15 +927,28 @@ class MainWindow(QtWidgets.QMainWindow):
         self.scene.clear_path()
         self.scene.clear_obstacles()
 
-        path = data.get("path", {})
-        raw = [tuple(p) for p in path.get("raw_points_cm", [])]
-        smooth = [tuple(p) for p in path.get("smoothed_points_cm", [])]
-        if raw:
-            self.scene.path_item.set_points(raw, smooth or raw)
-            self.scene._refresh_collision()
+        # 优先读新格式 segments，降级到旧格式 path
+        if "segments" in data:
+            segments_data = data["segments"]
+            action_chains_data = [
+                seg.get("action_chain", []) for seg in segments_data
+            ]
+            self.scene.rebuild_from_segments(segments_data, action_chains_data)
+        else:
+            path = data.get("path", {})
+            raw = [tuple(p) for p in path.get("raw_points_cm", [])]
+            smooth = [tuple(p) for p in path.get("smoothed_points_cm", [])]
+            if raw:
+                self.scene.rebuild_from_segments(
+                    [{"raw_points_cm": [[x, y] for x, y in raw],
+                      "smoothed_points_cm": [[x, y] for x, y in smooth]}],
+                    [[]]
+                )
 
         for od in data.get("obstacles", []):
             self.scene.add_obstacle_item(ObstacleItem.from_dict(od))
+
+        self._refresh_seq_tree()
 
     # ---- 杂项 ----
     def _refresh_title(self):
@@ -666,35 +966,42 @@ class MainWindow(QtWidgets.QMainWindow):
         ) == QtWidgets.QMessageBox.Yes
 
     def _confirm_export(self, sequence):
-        # 统计补偿/反转是否生效
-        nonzero_omega = sum(1 for d, vx, vy, w in sequence if w != 0)
-        max_abs_omega = max((abs(w) for d, vx, vy, w in sequence), default=0)
+        # 只统计标准运动步骤（4元组且第1元不是字符串）
+        motion_steps = [s for s in sequence if not isinstance(s[0], str)]
+        nonzero_omega = sum(1 for d, vx, vy, w in motion_steps if w != 0)
+        max_abs_omega = max((abs(w) for d, vx, vy, w in motion_steps), default=0)
+        action_steps = len(sequence) - len(motion_steps)
 
         flags = []
         if self.chk_invert_x.isChecked():
-            flags.append("✓ 反转 X 轴")
+            flags.append("反转 X 轴")
         if self.chk_invert_y.isChecked():
-            flags.append("✓ 反转 Y 轴")
+            flags.append("反转 Y 轴")
         if self.sp_drift_left.value() or self.sp_drift_right.value():
-            flags.append("✓ 漂移补偿 L=%+d R=%+d" % (
+            flags.append("漂移补偿 L=%+d R=%+d" % (
                 self.sp_drift_left.value(), self.sp_drift_right.value()))
         if self.sp_ramp_ms.value() > 0:
-            flags.append("✓ 速度过渡 %d ms" % self.sp_ramp_ms.value())
+            flags.append("速度过渡 %d ms" % self.sp_ramp_ms.value())
         flags_text = "\n  ".join(flags) if flags else "（无补偿/反转，原样导出）"
 
-        # 预览前几步
-        preview = "\n".join(
-            "  (%5.2fs, Vx=%4d, Vy=%4d, ω=%4d)" % (d, vx, vy, w)
-            for d, vx, vy, w in sequence[:8]
-        )
+        # 预览前 8 步（混合显示）
+        preview_lines = []
+        for step in sequence[:8]:
+            if isinstance(step[0], str):
+                preview_lines.append("  %r" % (step,))
+            else:
+                d, vx, vy, w = step
+                preview_lines.append("  (%5.2fs, Vx=%4d, Vy=%4d, w=%4d)" % (d, vx, vy, w))
+        preview = "\n".join(preview_lines)
         if len(sequence) > 8:
             preview += "\n  ... (共 %d 步)" % len(sequence)
 
         msg = (
             "当前补偿设置：\n  " + flags_text + "\n\n"
-            + "导出序列：%d 步\n" % len(sequence)
-            + "其中带 ω 旋转的步: %d 步（最大 |ω|=%d）\n\n" % (nonzero_omega, max_abs_omega)
+            + "导出序列：%d 步（运动 %d + 动作 %d）\n" % (
+                len(sequence), len(motion_steps), action_steps)
+            + "其中旋转步: %d（最大 |w|=%d）\n\n" % (nonzero_omega, max_abs_omega)
             + "前 8 步预览：\n" + preview + "\n\n"
-            + "确认补偿已生效后，点 Yes 写入 mecanum_forward.py（自动 .bak 备份）"
+            + "确认后写入 %s（自动 .bak 备份）" % self._current_profile().file_path.name
         )
         return self._confirm(msg)

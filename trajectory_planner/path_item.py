@@ -53,6 +53,8 @@ class PathItem(QtWidgets.QGraphicsPathItem):
         self._collide = False
         self._configure_pen()
         self.setZValue(20)
+        # 允许选中（选中后可用 Del 删除）
+        self.setFlag(QtWidgets.QGraphicsItem.ItemIsSelectable, True)
 
         # 起点 / 终点小圆圈
         self._start_marker = QtWidgets.QGraphicsEllipseItem(self)
@@ -67,10 +69,18 @@ class PathItem(QtWidgets.QGraphicsPathItem):
 
     def _configure_pen(self):
         color = self.COLOR_COLLIDE if self._collide else self.COLOR_NORMAL
-        pen = QtGui.QPen(color, PATH_PEN_WIDTH_CM)
+        # 选中时加粗、半透明橙色覆盖
+        if self.isSelected():
+            color = QtGui.QColor(255, 160, 0)
+        pen = QtGui.QPen(color, PATH_PEN_WIDTH_CM * (1.8 if self.isSelected() else 1.0))
         pen.setCapStyle(QtCore.Qt.RoundCap)
         pen.setJoinStyle(QtCore.Qt.RoundJoin)
         self.setPen(pen)
+
+    def itemChange(self, change, value):
+        if change == QtWidgets.QGraphicsItem.ItemSelectedChange:
+            self._configure_pen()
+        return super().itemChange(change, value)
 
     def set_collision(self, collide):
         if collide == self._collide:

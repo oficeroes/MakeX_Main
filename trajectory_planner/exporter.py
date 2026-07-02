@@ -145,7 +145,13 @@ def upsert_int_constant(text, name, value):
 
 def format_sequence_block(sequence, source_name="(manual)", mode="translation",
                           cm_per_s_at_p50=30.0, auto_power=50):
-    """生成新的 AUTO_SEQUENCE = [...] 文本块（保留尾随换行）"""
+    """生成新的 AUTO_SEQUENCE = [...] 文本块（保留尾随换行）
+
+    sequence 可包含混合元组：
+      (dur, vx, vy, w)          — 标准运动步骤
+      ("servo", id, angle, speed, wait_ms)  — 舵机动作
+      ("delay", dur, 0, 0, 0)   — 延时
+    """
     timestamp = datetime.now().strftime("%Y-%m-%d %H:%M")
     header = [
         "AUTO_SEQUENCE = [\n",
@@ -155,8 +161,12 @@ def format_sequence_block(sequence, source_name="(manual)", mode="translation",
             mode, cm_per_s_at_p50, auto_power),
     ]
     body = []
-    for dur, vx, vy, w in sequence:
-        body.append("    (%5.2f, %4d, %4d, %4d),\n" % (dur, vx, vy, w))
+    for step in sequence:
+        if isinstance(step[0], str):
+            body.append("    %r,\n" % (step,))
+        else:
+            dur, vx, vy, w = step
+            body.append("    (%5.2f, %4d, %4d, %4d),\n" % (dur, vx, vy, w))
     footer = ["]\n"]
     return "".join(header + body + footer)
 

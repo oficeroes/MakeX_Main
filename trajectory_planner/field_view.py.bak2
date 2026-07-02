@@ -9,36 +9,41 @@ FieldView 用 scale(1, -1) 翻转 Y 轴，使屏幕"上方"对应 +Y（机器人
 
 FieldScene（QGraphicsScene）
 ============================
-职责：场地边框 + 网格 + 障碍物列表 + 多段轨迹 + 执行块链 + 碰撞检测
+职责：场地边框 + 网格 + 障碍物列表 + 单条轨迹 + 碰撞检测
 
   场地边框：白色矩形，zValue=-100
   网格：每 GRID_SPACING_CM(=10) cm 一条浅灰线，50 cm 倍数的线稍深，zValue=-99
   障碍物：ObstacleItem 列表，zValue=10
-  轨迹：path_segments 列表（每段一个 PathItem），zValue=20
-  执行块：action_chains 列表（与 path_segments 平行），zValue=25
+  轨迹：单个 PathItem，zValue=20
+  标记（起/终点小圆）：zValue=21，PathItem 的子项
 
-多段路径模型
-============
-  path_segments: list[PathItem]                  — 每次鼠标释放完成一段
-  action_chains: list[list[ActionBlockItem]]     — 每段对应若干执行块，按顺序排列
-  path_item property: 最后一段（或哑元 PathItem）— 向后兼容
-
-执行块布局
-==========
-  块吸附在路段终点右侧，垂直向上堆叠（间距 = BLOCK_GAP cm）
-  _reposition_blocks(seg_idx) 在任何改变后刷新位置
+  碰撞检测：path().intersects(QRectF) 逐障碍判断，结果设给 PathItem.set_collision()。
+  每次障碍物移动/缩放（obstacle_changed 回调）和轨迹更新（finish_path/resmooth）都刷新。
 
 绘制流程（鼠标）
 ================
-  mousePressEvent  → start_path(scene_pos)   : append 新段，开始采样
+  mousePressEvent  → start_path(scene_pos)   : 清旧轨迹，开始新采样
   mouseMoveEvent   → extend_path(scene_pos)  : 追加采样点 + preview_raw()
-  mouseReleaseEvent→ finish_path()           : 平滑 + 重采样 + 刷新碰撞 + 发信号
+  mouseReleaseEvent→ finish_path()           : Chaikin 平滑 + 重采样 + 刷新碰撞 + 发 path_finalized 信号
+
+  点到 ObstacleItem 或 _Handle 时，改为走 Qt 默认事件流（拖拽/选中），不开始画线。
+
+FieldView（QGraphicsView）
+==========================
+  - Antialiasing + SmoothPixmapTransform 渲染
+  - 禁用滚动条；fitInView 完全负责缩放
+  - _is_background(item)：判断命中项是否是"背景"（网格/底板），是则可以开始画线
 
 信号
 ====
-  path_finalized(int)  鼠标抬起、平滑完成后发射，携带段索引
-  obstacles_changed    障碍物增删或几何变化后发射
-  mouse_pos_cm         鼠标在场景中的 (x_cm, y_cm)
+  path_finalized      鼠标抬起、平滑完成后发射，main_window 用来更新状态栏
+  obstacles_changed   障碍物增删或几何变化后发射（预留，当前 main_window 未接）
+
+注意
+====
+- 同一时刻只有一条轨迹（self.path_item），新建时 clear()。
+- 平滑参数 smooth_iter / resample_step 由 main_window 在绘制前注入。
+- resmooth() 用新参数重跑现有 raw_points，无需重新画。
 """
 from PyQt5 import QtCore, QtGui, QtWidgets
 
@@ -46,15 +51,14 @@ from .config import GRID_SPACING_CM
 from .obstacle_item import ObstacleItem
 from .path_item import PathItem
 from .smoothing import smooth_and_resample
-from .action_block_item import ActionBlockItem, block_anchor
 
 
 class FieldScene(QtWidgets.QGraphicsScene):
-    """场景：固定矩形场地 + 网格 + 障碍物 + 多段轨迹 + 执行块"""
+    """场景：固定矩形场地 + 网格 + 障碍物 + 轨迹"""
 
-    path_finalized = QtCore.pyqtSignal(int)    # 参数：完成的段索引
-    obstacles_changed = QtCore.pyqtSignal()
-    mouse_pos_cm = QtCore.pyqtSignal(float, float)
+    path_finalized = QtCore.pyqtSignal()   # 鼠标抬起后发射
+    obstacles_changed = QtCore.pyqtSignal()  # 障碍物增删/几何变化
+    mouse_pos_cm = QtCore.pyqtSignal(float, float)  # 鼠标在场景中的 (x_cm, y_cm)
 
     def __init__(self, width_cm, height_cm, parent=None):
         super().__init__(parent)
@@ -72,23 +76,15 @@ class FieldScene(QtWidgets.QGraphicsScene):
         self._grid_items = []
         self._rebuild_grid()
 
-        # 多段路径
-        self.path_segments = []         # list[PathItem]
-        self.action_chains = []         # list[list[ActionBlockItem]]
+        self.path_item = PathItem()
+        self.addItem(self.path_item)
+
+        # 绘制中的临时点列（鼠标按下时生效）
         self._drawing = False
-        self._drawing_seg = -1
 
-        # 向后兼容的哑元（无段时作为 path_item 返回）
-        self._dummy_path = PathItem()
-        self.addItem(self._dummy_path)
-
+        # 平滑参数（外部注入）
         self.smooth_iter = 3
         self.resample_step = 5.0
-
-    # ---- 向后兼容 ----
-    @property
-    def path_item(self):
-        return self.path_segments[-1] if self.path_segments else self._dummy_path
 
     # ---- 场地尺寸 ----
     def set_field_size(self, w, h):
@@ -140,6 +136,7 @@ class FieldScene(QtWidgets.QGraphicsScene):
         return obs
 
     def add_obstacle_item(self, obs):
+        """从导入数据加入已构造好的障碍物"""
         self.addItem(obs)
         self.obstacle_changed(obs)
         self.obstacles_changed.emit()
@@ -162,161 +159,76 @@ class FieldScene(QtWidgets.QGraphicsScene):
         self.obstacles_changed.emit()
 
     def obstacle_changed(self, obs):
+        """由 ObstacleItem 调用，触发碰撞检测刷新"""
         self._refresh_collision()
         self.obstacles_changed.emit()
 
     # ---- 碰撞检测 ----
     def _refresh_collision(self):
-        obs_rects = [obs.rect_scene() for obs in self.obstacles()]
-        for seg in self.path_segments:
-            if not seg.smoothed_points:
-                seg.set_collision(False)
-                continue
-            p = seg.path()
-            collide = any(
-                p.intersects(QtCore.QRectF(x, y, w, h))
-                for x, y, w, h in obs_rects
-            )
-            seg.set_collision(collide)
+        if not self.path_item or not self.path_item.smoothed_points:
+            self.path_item.set_collision(False) if self.path_item else None
+            return
+        path = self.path_item.path()
+        collide = False
+        for obs in self.obstacles():
+            x, y, w, h = obs.rect_scene()
+            rect = QtCore.QRectF(x, y, w, h)
+            if path.intersects(rect):
+                collide = True
+                break
+        self.path_item.set_collision(collide)
 
-    # ---- 绘制轨迹 ----
+    # ---- 绘制轨迹（由 FieldView 转发鼠标事件）----
     def start_path(self, scene_pos):
         self._drawing = True
-        seg = PathItem()
-        self.addItem(seg)
-        self.path_segments.append(seg)
-        self.action_chains.append([])
-        self._drawing_seg = len(self.path_segments) - 1
-        seg.append_raw(scene_pos.x(), scene_pos.y())
-        seg.preview_raw()
+        self.path_item.clear()
+        self.path_item.append_raw(scene_pos.x(), scene_pos.y())
+        self.path_item.preview_raw()
 
     def extend_path(self, scene_pos):
-        if not self._drawing or self._drawing_seg < 0:
+        if not self._drawing:
             return
-        seg = self.path_segments[self._drawing_seg]
-        seg.append_raw(scene_pos.x(), scene_pos.y())
-        seg.preview_raw()
+        self.path_item.append_raw(scene_pos.x(), scene_pos.y())
+        self.path_item.preview_raw()
 
     def finish_path(self):
-        if not self._drawing or self._drawing_seg < 0:
+        if not self._drawing:
             return
         self._drawing = False
-        idx = self._drawing_seg
-        self._drawing_seg = -1
-        seg = self.path_segments[idx]
-        raw = list(seg.raw_points)
+        raw = list(self.path_item.raw_points)
         if len(raw) >= 2:
             smoothed = smooth_and_resample(raw, self.smooth_iter, self.resample_step)
         else:
             smoothed = list(raw)
-        seg.set_points(raw, smoothed)
-        self._reposition_blocks(idx)
+        self.path_item.set_points(raw, smoothed)
         self._refresh_collision()
-        self.path_finalized.emit(idx)
+        self.path_finalized.emit()
 
-    def resmooth(self, iterations, step, seg_idx=None):
+    def resmooth(self, iterations, step):
+        """用新参数重新平滑现有 raw_points"""
         self.smooth_iter = iterations
         self.resample_step = step
-        indices = range(len(self.path_segments)) if seg_idx is None else [seg_idx]
-        for i in indices:
-            seg = self.path_segments[i]
-            raw = list(seg.raw_points)
-            if len(raw) >= 2:
-                smoothed = smooth_and_resample(raw, iterations, step)
-            else:
-                smoothed = list(raw)
-            seg.set_points(raw, smoothed)
-            self._reposition_blocks(i)
+        raw = list(self.path_item.raw_points)
+        if len(raw) >= 2:
+            smoothed = smooth_and_resample(raw, iterations, step)
+        else:
+            smoothed = list(raw)
+        self.path_item.set_points(raw, smoothed)
         self._refresh_collision()
 
     def clear_path(self):
-        for seg in self.path_segments:
-            self.removeItem(seg)
-        for chain in self.action_chains:
-            for block in chain:
-                self.removeItem(block)
-        self.path_segments = []
-        self.action_chains = []
-        self._drawing = False
-        self._drawing_seg = -1
-        self._refresh_collision()
-
-    # ---- 执行块 ----
-    def add_action_block(self, seg_idx, block):
-        if seg_idx < 0 or seg_idx >= len(self.path_segments):
-            return
-        self.addItem(block)
-        self.action_chains[seg_idx].append(block)
-        self._reposition_blocks(seg_idx)
-
-    def remove_action_block(self, seg_idx, block):
-        if seg_idx < 0 or seg_idx >= len(self.action_chains):
-            return
-        chain = self.action_chains[seg_idx]
-        if block in chain:
-            chain.remove(block)
-            self.removeItem(block)
-            self._reposition_blocks(seg_idx)
-
-    def move_action_block(self, seg_idx, old_pos, new_pos):
-        chain = self.action_chains[seg_idx]
-        if 0 <= old_pos < len(chain) and 0 <= new_pos < len(chain):
-            chain.insert(new_pos, chain.pop(old_pos))
-            self._reposition_blocks(seg_idx)
-
-    def _reposition_blocks(self, seg_idx):
-        if seg_idx < 0 or seg_idx >= len(self.path_segments):
-            return
-        seg = self.path_segments[seg_idx]
-        pts = seg.smoothed_points or seg.raw_points
-        if not pts:
-            return
-        end_x, end_y = pts[-1]
-        for i, block in enumerate(self.action_chains[seg_idx]):
-            x, y = block_anchor(end_x, end_y, i)
-            block.setPos(x, y)
-
-    def action_blocks_flat(self):
-        result = []
-        for i, chain in enumerate(self.action_chains):
-            for block in chain:
-                result.append((i, block))
-        return result
-
-    def rebuild_from_segments(self, segments_data, action_chains_data=None):
-        """从 JSON 数据重建多段路径 + 执行块"""
-        self.clear_path()
-        if action_chains_data is None:
-            action_chains_data = [[] for _ in segments_data]
-
-        for seg_data, chain_data in zip(segments_data, action_chains_data):
-            raw = [tuple(p) for p in seg_data.get("raw_points_cm", [])]
-            smooth = [tuple(p) for p in seg_data.get("smoothed_points_cm", [])]
-            if not raw:
-                continue
-            seg = PathItem()
-            self.addItem(seg)
-            seg.set_points(raw, smooth or raw)
-            self.path_segments.append(seg)
-
-            chain = []
-            for bd in chain_data:
-                block = ActionBlockItem.from_dict(bd)
-                self.addItem(block)
-                chain.append(block)
-            self.action_chains.append(chain)
-            self._reposition_blocks(len(self.path_segments) - 1)
-
+        self.path_item.clear()
         self._refresh_collision()
 
 
 class FieldView(QtWidgets.QGraphicsView):
-    """视图：自动保持场地纵横比；左键绘制轨迹（除非按到障碍物/手柄/执行块）"""
+    """视图：自动保持场地纵横比；左键绘制轨迹（除非按到障碍物/手柄）"""
 
     def __init__(self, scene, parent=None):
         super().__init__(scene, parent)
         self.setRenderHint(QtGui.QPainter.Antialiasing)
         self.setRenderHint(QtGui.QPainter.SmoothPixmapTransform)
+        # Y 轴翻转：屏幕"上"对应场景 +Y
         self.scale(1, -1)
         self.setMouseTracking(True)
         self.setBackgroundBrush(QtGui.QBrush(QtGui.QColor(60, 60, 65)))
@@ -334,9 +246,11 @@ class FieldView(QtWidgets.QGraphicsView):
         super().showEvent(event)
         self.fitInView(self.scene().sceneRect(), QtCore.Qt.KeepAspectRatio)
 
+    # ---- 鼠标 ----
     def mousePressEvent(self, event):
         if event.button() == QtCore.Qt.LeftButton:
             item = self.itemAt(event.pos())
+            # 如果点到障碍物/手柄/障碍物子项，让 Qt 走正常选择/拖拽
             if item is not None and not self._is_background(item):
                 super().mousePressEvent(event)
                 return
@@ -365,12 +279,10 @@ class FieldView(QtWidgets.QGraphicsView):
 
     @staticmethod
     def _is_background(item):
+        """判断 itemAt 命中的是否是网格/底板，可以无视并直接开始画"""
         from .obstacle_item import ObstacleItem, _Handle
-        from .path_item import PathItem as _PathItem
         if isinstance(item, (ObstacleItem, _Handle)):
             return False
-        if isinstance(item, _PathItem):
-            return False
-        if isinstance(item, ActionBlockItem):
+        if isinstance(item, PathItem):
             return False
         return True

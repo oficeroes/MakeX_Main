@@ -80,20 +80,44 @@ def next_filename(folder=TRAJECTORIES_DIR):
 
 
 def build_payload(field_w, field_h, calibration, settings,
-                  raw_points, smoothed_points, obstacles):
-    """组装要存盘的数据结构"""
-    return {
+                  raw_points, smoothed_points, obstacles,
+                  path_segments=None, action_chains=None):
+    """组装要存盘的数据结构
+
+    path_segments: list of (raw_points, smoothed_points) tuples，多段路径。
+                   None 时向后兼容：用 raw_points/smoothed_points 组成单段。
+    action_chains: list of list of dicts（ActionBlockItem.to_dict() 结果），
+                   与 path_segments 平行。None 时默认每段无 block。
+    """
+    if path_segments is None:
+        path_segments = [(raw_points, smoothed_points)]
+    if action_chains is None:
+        action_chains = [[] for _ in path_segments]
+
+    segments_data = []
+    for (raw, smooth), blocks in zip(path_segments, action_chains):
+        segments_data.append({
+            "raw_points_cm": [[float(x), float(y)] for x, y in raw],
+            "smoothed_points_cm": [[float(x), float(y)] for x, y in smooth],
+            "action_chain": [dict(b) for b in blocks],
+        })
+
+    payload = {
         "schema_version": SCHEMA_VERSION,
         "created_at": datetime.now().isoformat(timespec="seconds"),
         "field": {"width_cm": float(field_w), "height_cm": float(field_h)},
         "calibration": dict(calibration),
         "settings": dict(settings),
-        "path": {
-            "raw_points_cm": [[float(x), float(y)] for x, y in raw_points],
-            "smoothed_points_cm": [[float(x), float(y)] for x, y in smoothed_points],
-        },
+        "segments": segments_data,
         "obstacles": [dict(o) for o in obstacles],
     }
+    # 向后兼容：保留顶层 "path" 字段（存第一段）
+    if segments_data:
+        payload["path"] = {
+            "raw_points_cm": segments_data[0]["raw_points_cm"],
+            "smoothed_points_cm": segments_data[0]["smoothed_points_cm"],
+        }
+    return payload
 
 
 def save_trajectory(payload, target_path=None):

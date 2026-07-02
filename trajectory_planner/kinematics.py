@@ -197,9 +197,10 @@ def round_sequence(seq):
 
 def build_sequence(points, mode, cm_per_s_at_p50, deg_per_s_at_omega50,
                    auto_power, omega_power, invert_x=False, invert_y=False,
-                   drift_left_omega=0, drift_right_omega=0):
+                   drift_left_omega=0, drift_right_omega=0, add_stop=True):
     """完整管线：模式分发 → 合并 → 漂移补偿（GUI 视角）→ 反转 → 加停止缓冲 → 格式化
 
+    add_stop=False 时不追加 STOP_BUFFER，用于多段合并时每段单独生成。
     补偿在反转之前做。这样无论 invert_x/y 怎么设，drift_left_omega 始终对应
     "你画图时往左的那个方向"的补偿，所见即所得。
 
@@ -246,5 +247,6 @@ def build_sequence(points, mode, cm_per_s_at_p50, deg_per_s_at_omega50,
         merged = flipped
 
     rounded = round_sequence(merged)
-    rounded.append(STOP_BUFFER)
+    if add_stop:
+        rounded.append(STOP_BUFFER)
     return rounded
