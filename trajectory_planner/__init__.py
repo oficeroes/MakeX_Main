@@ -5,8 +5,8 @@
 用 PyQt5 绘制场地轨迹 → 平滑 → 转换为 AUTO_SEQUENCE 元组列表 → 写入机器人源文件。
 
 支持的底盘（见 config.CHASSIS_PROFILES）
-  - omni3       三轮全向（120° 对称），mecanum_forward.py
-  - mecanum_x   X 型麦克纳姆（4 轮），mecanum_X_forward.py
+  - omni3        三轮全向（120° 对称），mecanum_forward.py
+  - mecanum_4w   四轮 X 型麦克纳姆（含收球/滚球），mecanum_drive.py
 
 运行方式
 ========

@@ -81,22 +81,25 @@ def next_filename(folder=TRAJECTORIES_DIR):
 
 def build_payload(field_w, field_h, calibration, settings,
                   raw_points, smoothed_points, obstacles,
-                  path_segments=None, action_chains=None):
+                  path_segments=None, action_chains=None,
+                  segment_vehicle_ids=None):
     """组装要存盘的数据结构
 
-    path_segments: list of (raw_points, smoothed_points) tuples，多段路径。
-                   None 时向后兼容：用 raw_points/smoothed_points 组成单段。
-    action_chains: list of list of dicts（ActionBlockItem.to_dict() 结果），
-                   与 path_segments 平行。None 时默认每段无 block。
+    path_segments:        list of (raw_points, smoothed_points) tuples
+    action_chains:        list of list of dicts
+    segment_vehicle_ids:  list of str — 每段对应的 profile_id
     """
     if path_segments is None:
         path_segments = [(raw_points, smoothed_points)]
     if action_chains is None:
         action_chains = [[] for _ in path_segments]
+    if segment_vehicle_ids is None:
+        segment_vehicle_ids = ["" for _ in path_segments]
 
     segments_data = []
-    for (raw, smooth), blocks in zip(path_segments, action_chains):
+    for (raw, smooth), blocks, vid in zip(path_segments, action_chains, segment_vehicle_ids):
         segments_data.append({
+            "vehicle_id": vid,
             "raw_points_cm": [[float(x), float(y)] for x, y in raw],
             "smoothed_points_cm": [[float(x), float(y)] for x, y in smooth],
             "action_chain": [dict(b) for b in blocks],
@@ -111,7 +114,6 @@ def build_payload(field_w, field_h, calibration, settings,
         "segments": segments_data,
         "obstacles": [dict(o) for o in obstacles],
     }
-    # 向后兼容：保留顶层 "path" 字段（存第一段）
     if segments_data:
         payload["path"] = {
             "raw_points_cm": segments_data[0]["raw_points_cm"],

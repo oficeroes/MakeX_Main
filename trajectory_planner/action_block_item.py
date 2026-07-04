@@ -26,15 +26,19 @@ def block_anchor(end_x, end_y, index):
     return x, y
 
 _COLORS = {
-    "drive":  ("#1565C0", "#E3F2FD"),
-    "servo":  ("#2E7D32", "#E8F5E9"),
-    "delay":  ("#E65100", "#FFF3E0"),
+    "drive":    ("#1565C0", "#E3F2FD"),
+    "servo":    ("#2E7D32", "#E8F5E9"),
+    "delay":    ("#E65100", "#FFF3E0"),
+    "spin":     ("#6A1B9A", "#F3E5F5"),
+    "motor":    ("#C62828", "#FFEBEE"),
+    "dc_motor": ("#00838F", "#E0F7FA"),
 }
-_ICON = {"drive": ">>", "servo": "SV", "delay": "T"}
+_ICON = {"drive": ">>", "servo": "SV", "delay": "T", "spin": "⟳", "motor": "M", "dc_motor": "DC"}
 
 
 def _type_name(block_type):
-    return {"drive": "行走", "servo": "舵机", "delay": "延时"}.get(block_type, block_type)
+    return {"drive": "行走", "servo": "舵机", "delay": "延时", "spin": "自旋",
+            "motor": "编码电机", "dc_motor": "直流电机"}.get(block_type, block_type)
 
 
 def _default_params(block_type):
@@ -44,6 +48,12 @@ def _default_params(block_type):
         return {"servo_id": "S1", "angle": 90, "speed": 50, "wait_ms": 500}
     if block_type == "delay":
         return {"duration_s": 1.0}
+    if block_type == "spin":
+        return {"degrees": 90, "omega_power": 40}
+    if block_type == "motor":
+        return {"motor_id": "M1", "power": 50}
+    if block_type == "dc_motor":
+        return {"dc_port": "DC1", "power": 100}
     return {}
 
 
@@ -54,6 +64,9 @@ class ActionBlockItem(QtWidgets.QGraphicsObject):
     TYPE_DRIVE = "drive"
     TYPE_SERVO = "servo"
     TYPE_DELAY = "delay"
+    TYPE_SPIN  = "spin"
+    TYPE_MOTOR = "motor"
+    TYPE_DC_MOTOR = "dc_motor"
 
     block_changed = QtCore.pyqtSignal()
 
@@ -70,6 +83,18 @@ class ActionBlockItem(QtWidgets.QGraphicsObject):
         )
         self.setZValue(25)
         self.setCursor(QtCore.Qt.SizeAllCursor)
+        self._drag_start_pos = None
+
+    def mousePressEvent(self, event):
+        self._drag_start_pos = self.pos()
+        super().mousePressEvent(event)
+
+    def mouseReleaseEvent(self, event):
+        # 拖拽结束后弹回原位（块应该吸附在路径末端，不允许自由放置）
+        if self._drag_start_pos is not None:
+            self.setPos(self._drag_start_pos)
+            self._drag_start_pos = None
+        super().mouseReleaseEvent(event)
 
     def boundingRect(self):
         return QtCore.QRectF(0, 0, BLOCK_W, BLOCK_H)
@@ -159,6 +184,12 @@ class ActionBlockItem(QtWidgets.QGraphicsObject):
                 p.get("servo_id", "S1"), p.get("angle", 90), p.get("speed", 50))
         if self.block_type == "delay":
             return "%.1f s" % p.get("duration_s", 1.0)
+        if self.block_type == "spin":
+            return "%d° @P%d" % (p.get("degrees", 90), p.get("omega_power", 40))
+        if self.block_type == "motor":
+            return "%s @%d%%" % (p.get("motor_id", "M1"), p.get("power", 50))
+        if self.block_type == "dc_motor":
+            return "%s @%d%%" % (p.get("dc_port", "DC1"), p.get("power", 100))
         return "?"
 
     def type_label(self):
@@ -201,6 +232,18 @@ class ActionBlockItem(QtWidgets.QGraphicsObject):
                      int(p.get("wait_ms", 500)))]
         if self.block_type == "delay":
             return [("delay", round(float(p.get("duration_s", 1.0)), 2))]
+        if self.block_type == "spin":
+            return [("spin",
+                     int(p.get("degrees", 90)),
+                     int(p.get("omega_power", 40)))]
+        if self.block_type == "motor":
+            return [("motor",
+                     str(p.get("motor_id", "M1")),
+                     int(p.get("power", 50)))]
+        if self.block_type == "dc_motor":
+            return [("dc_motor",
+                     str(p.get("dc_port", "DC1")),
+                     int(p.get("power", 100)))]
         return []
 
     def to_dict(self):
@@ -270,12 +313,61 @@ class ActionBlockEditor(QtWidgets.QDialog):
             layout.addRow("等待时间:", wait)
             self._widgets["wait_ms"] = wait
 
+        elif block_type == "spin":
+            deg = QtWidgets.QSpinBox()
+            deg.setRange(-3600, 3600); deg.setSuffix(" deg")
+            deg.setValue(int(params.get("degrees", 90)))
+            deg.setToolTip("正数=顺时针自旋，负数=逆时针自旋")
+            layout.addRow("旋转角度:", deg)
+            self._widgets["degrees"] = deg
+
+            wp = QtWidgets.QSpinBox()
+            wp.setRange(1, 100); wp.setSuffix(" %")
+            wp.setValue(int(params.get("omega_power", 40)))
+            wp.setToolTip("旋转时 omega 功率（%）")
+            layout.addRow("旋转功率:", wp)
+            self._widgets["omega_power"] = wp
+
         elif block_type == "delay":
             dur = QtWidgets.QDoubleSpinBox()
             dur.setRange(0.01, 60); dur.setDecimals(2); dur.setSuffix(" s")
             dur.setValue(float(params.get("duration_s", 1.0)))
             layout.addRow("延时时长:", dur)
             self._widgets["duration_s"] = dur
+
+        elif block_type == "motor":
+            mid = QtWidgets.QComboBox()
+            mid.addItems(["M1", "M2", "M3", "M4", "M5", "M6"])
+            cur = str(params.get("motor_id", "M1"))
+            i = mid.findText(cur)
+            if i >= 0:
+                mid.setCurrentIndex(i)
+            layout.addRow("电机编号:", mid)
+            self._widgets["motor_id_combo"] = mid
+
+            mpw = QtWidgets.QSpinBox()
+            mpw.setRange(-100, 100); mpw.setSuffix(" %")
+            mpw.setValue(int(params.get("power", 50)))
+            mpw.setToolTip("正数=正转，负数=反转。设置后电机会一直转！")
+            layout.addRow("电机功率:", mpw)
+            self._widgets["power"] = mpw
+
+        elif block_type == "dc_motor":
+            dport = QtWidgets.QComboBox()
+            dport.addItems(["DC1", "DC2", "DC3"])
+            cur = str(params.get("dc_port", "DC1"))
+            i = dport.findText(cur)
+            if i >= 0:
+                dport.setCurrentIndex(i)
+            layout.addRow("直流端口:", dport)
+            self._widgets["dc_port_combo"] = dport
+
+            dpw = QtWidgets.QSpinBox()
+            dpw.setRange(-100, 100); dpw.setSuffix(" %")
+            dpw.setValue(int(params.get("power", 100)))
+            dpw.setToolTip("正数=正转，负数=反转。设置后会一直转！")
+            layout.addRow("电机功率:", dpw)
+            self._widgets["power"] = dpw
 
         btns = QtWidgets.QDialogButtonBox(
             QtWidgets.QDialogButtonBox.Ok | QtWidgets.QDialogButtonBox.Cancel)
@@ -292,6 +384,15 @@ class ActionBlockEditor(QtWidgets.QDialog):
             p["angle"] = self._widgets["angle"].value()
             p["speed"] = self._widgets["speed"].value()
             p["wait_ms"] = self._widgets["wait_ms"].value()
+        elif self.block_type == "spin":
+            p["degrees"] = self._widgets["degrees"].value()
+            p["omega_power"] = self._widgets["omega_power"].value()
         elif self.block_type == "delay":
             p["duration_s"] = self._widgets["duration_s"].value()
+        elif self.block_type == "motor":
+            p["motor_id"] = self._widgets["motor_id_combo"].currentText()
+            p["power"] = self._widgets["power"].value()
+        elif self.block_type == "dc_motor":
+            p["dc_port"] = self._widgets["dc_port_combo"].currentText()
+            p["power"] = self._widgets["power"].value()
         return p

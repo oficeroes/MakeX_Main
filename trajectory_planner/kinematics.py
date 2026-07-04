@@ -1,59 +1,35 @@
-"""轨迹 → AUTO_SEQUENCE 转换
+"""
+轨迹 → AUTO_SEQUENCE 转换  (v5: 闭环编码器模式)
 
 目的
 ====
 把平滑后的点列（cm 坐标，+Y 朝前 / +X 朝右）变成机器人可执行的
-AUTO_SEQUENCE 元组列表：[(duration_sec, Vx, Vy, omega), ...]
+AUTO_SEQUENCE 元组列表。
 
-坐标约定（GUI 视角，build_sequence 入口处使用的语义）
-=====
-  +X = 右    +Y = 前    omega > 0 = 顺时针旋转
+v5 新增：编码器闭环模式（encoder_based=True）
+  每段输出 ('enc_move', target_ticks, Vy_power, 0) 而非时间步。
+  机器人用 PID 追踪编码器目标，从根源消除"一卡一卡"问题。
 
-注意：Vx/Vy 是电机功率百分比（-100~100），不是 cm/s！
-速度由 cm_per_s_at_p50 标定常数换算。
+曲率自适应速度
+==============
+  转弯处速度降至 90%，直线处提升至 105%。
+  速度由 BASE_SPEED_CM_PER_SEC 控制，用户在 GUI 调节。
 
-两种运动模式
-============
-MODE_TRANSLATION（纯平移）
-  每段直接输出 (dt, Vx, Vy, 0)，车头方向不变。
-  Vx/Vy 方向向量 = 线段方向单位向量 × auto_power，
-  若合向量 > auto_power 则等比缩放（用于斜向运动）。
+两种模式
+========
+  MODE_TRANSLATION：纯平移，编码器追踪直走距离
+  MODE_HEADING：车头跟随，每段先自旋再直走
 
-MODE_HEADING（车头跟随路径）
-  每段先旋转再前进：
-    旋转步 = (|Δθ|/rot_speed, 0, 0, ±omega_power)
-    前进步 = (length/fwd_speed, 0, auto_power, 0)
-  旋转方向：机器人 +omega 顺时针，数学角增量 Δθ 逆时针 → 取反。
-  |Δθ| < ROTATION_DEADBAND_DEG 时跳过旋转步（去抖）。
+AUTO_SEQUENCE 格式（v5，encoder_based=True）
+===========================================
+  ('enc_move', ticks, Vy_power, 0)     — 直走 ticks 个编码单位
+  ('enc_rot',  ticks, 0, omega_power)  — 自旋 ticks 个编码单位
+  ('enc_stop', 0, 0, 0)                — 停止缓冲
+  其中 ticks = 距离(cm) × ENCODER_TICKS_PER_CM
 
-变换管线（build_sequence 内部顺序）
-====================================
-raw → merge_collinear → 漂移补偿 → 轴反转 + omega 镜像 → round → append STOP_BUFFER
-
-漂移补偿
---------
-  drift_left_omega:  Vx < 0（GUI 视角向左）时附加的 omega（正=顺时针）
-  drift_right_omega: Vx > 0（GUI 视角向右）时附加的 omega
-  强度 = drift_omega * |Vx| / auto_power（斜移时按比例缩小）
-  → 补偿在反转之前做，所以语义永远是"你画图时画的那个方向"。
-
-轴反转
-------
-  invert_x / invert_y: 机器人前后/左右接反时使用。
-  单轴翻转 = 镜像变换 → omega 方向也要取反（omega_flip = -1）。
-  双轴翻转 = 180° 旋转 → omega 不变（omega_flip = 1）。
-
-注意
-====
-- auto_power / omega_power 被 _clamp_power 限制在 [POWER_MIN, POWER_MAX]。
-- 合并只合并方向夹角 < MERGE_ANGLE_DEG 且 omega 相同的连续步骤，防止过合并。
-- STOP_BUFFER = (0.1, 0, 0, 0) 是末尾停止缓冲，务必保留（让机器人正常减速）。
-
-API
-===
-  build_sequence(points, mode, cm_per_s_at_p50, deg_per_s_at_omega50,
-                 auto_power, omega_power, invert_x=False, invert_y=False,
-                 drift_left_omega=0, drift_right_omega=0) -> list[tuple]
+AUTO_SEQUENCE 格式（v4 兼容，encoder_based=False）
+=================================================
+  (duration, Vx, Vy, omega)             — 时间驱动步
 """
 import math
 from .config import (
@@ -65,7 +41,321 @@ from .config import (
     STOP_BUFFER,
     POWER_MIN,
     POWER_MAX,
+    ENCODER_TICKS_PER_CM,
+    CURVE_SLOWDOWN_FACTOR,
+    STRAIGHT_BOOST_FACTOR,
+    CURVATURE_THRESHOLD,
+    BASE_SPEED_CM_PER_SEC,
+    BASE_ROT_DEG_PER_SEC,
 )
+
+
+def _clamp_power(p):
+    return max(POWER_MIN, min(POWER_MAX, p))
+
+
+def _wrap_deg(angle_deg):
+    while angle_deg > 180:
+        angle_deg -= 360
+    while angle_deg < -180:
+        angle_deg += 360
+    return angle_deg
+
+
+def _scale_vector_to_power(vx, vy, max_power):
+    mag = math.hypot(vx, vy)
+    if mag > max_power and mag > 1e-9:
+        s = max_power / mag
+        return vx * s, vy * s, max_power
+    return vx, vy, mag
+
+
+# ================================================================
+#  曲率计算 & 自适应速度
+# ================================================================
+
+def compute_curvature(points):
+    """Menger 曲率：用三点外接圆半径的倒数估算每点曲率 (1/cm)。
+
+    首尾点用相邻点外推。曲率越大 = 转弯越急。
+    """
+    n = len(points)
+    if n < 3:
+        return [0.0] * n
+
+    curv = []
+    for i in range(n):
+        if i == 0:
+            p0, p1, p2 = points[0], points[0], points[1]
+        elif i == n - 1:
+            p0, p1, p2 = points[-2], points[-1], points[-1]
+        else:
+            p0, p1, p2 = points[i - 1], points[i], points[i + 1]
+
+        # 三角形边长
+        a = math.hypot(p1[0] - p0[0], p1[1] - p0[1])
+        b = math.hypot(p2[0] - p1[0], p2[1] - p1[1])
+        c = math.hypot(p2[0] - p0[0], p2[1] - p0[1])
+
+        # 海伦公式求面积
+        s = (a + b + c) / 2.0
+        area_sq = max(0, s * (s - a) * (s - b) * (s - c))
+        area = math.sqrt(area_sq)
+
+        # 曲率 = 4*面积 / (a*b*c)，即 1/R
+        denom = a * b * c
+        if denom < 1e-12 or area < 1e-12:
+            curv.append(0.0)
+        else:
+            curv.append(4.0 * area / denom)
+
+    return curv
+
+
+def assign_adaptive_speed(points, base_power, base_speed_cm_s,
+                          slow_factor=CURVE_SLOWDOWN_FACTOR,
+                          boost_factor=STRAIGHT_BOOST_FACTOR,
+                          curve_thresh=CURVATURE_THRESHOLD):
+    """根据曲率为每个线段分配功率和速度。
+
+    返回: list of (vx_power, vy_power, speed_cm_s, factor)
+      factor = 慢/快倍率（0.9 转弯, 1.05 直线）
+    """
+    if len(points) < 2:
+        return []
+
+    curv = compute_curvature(points)
+    power = _clamp_power(base_power)
+    result = []
+
+    for i in range(len(points) - 1):
+        x0, y0 = points[i]
+        x1, y1 = points[i + 1]
+        dx, dy = x1 - x0, y1 - y0
+        length = math.hypot(dx, dy)
+        if length < 1e-6:
+            continue
+
+        # 线段中点曲率
+        mid_curv = (curv[i] + curv[i + 1]) / 2.0
+
+        if mid_curv > curve_thresh:
+            factor = slow_factor       # 转弯 → 减速
+        else:
+            factor = boost_factor      # 直线 → 加速
+
+        speed = base_speed_cm_s * factor
+        ux, uy = dx / length, dy / length
+        seg_power = power * factor     # 功率也等比缩放
+        vx = seg_power * ux
+        vy = seg_power * uy
+        vx, vy, _ = _scale_vector_to_power(vx, vy, max(seg_power, power))
+
+        result.append((vx, vy, speed, length, factor))
+
+    return result
+
+
+# ================================================================
+#  编码器闭环序列生成（v5 — 基于 cm 距离的速度曲线）
+# ================================================================
+
+def _path_total_length(points):
+    """计算路径总长度（cm）"""
+    total = 0.0
+    for i in range(len(points) - 1):
+        dx = points[i + 1][0] - points[i][0]
+        dy = points[i + 1][1] - points[i][1]
+        total += math.hypot(dx, dy)
+    return total
+
+
+def _speed_at_position(dist_from_start, total_len,
+                       accel_cm, decel_cm, min_spd, max_spd,
+                       curve_factor=1.0):
+    """根据沿路径的距离位置，返回该点的目标速度（cm/s）。
+
+    加速段（0 → accel_cm）：   min_spd → max_spd  线性递增
+    匀速段（accel_cm → total_len - decel_cm）：max_spd × curve_factor
+    减速段（total_len - decel_cm → total_len）：max_spd → min_spd  线性递减
+    路径太短时自动切换为三角形曲线。
+    """
+    if total_len <= accel_cm + decel_cm:
+        # 三角形：全程先升后降
+        mid = total_len / 2.0
+        if dist_from_start < mid:
+            return min_spd + (max_spd - min_spd) * (dist_from_start / mid)
+        else:
+            return max_spd - (max_spd - min_spd) * ((dist_from_start - mid) / mid)
+    else:
+        if dist_from_start < accel_cm:
+            return min_spd + (max_spd - min_spd) * (dist_from_start / accel_cm)
+        elif dist_from_start < total_len - decel_cm:
+            return max_spd * curve_factor
+        else:
+            remaining = total_len - dist_from_start
+            return min_spd + (max_spd - min_spd) * (remaining / decel_cm)
+
+
+def build_encoder_sequence(points, base_power, base_speed_cm_s=BASE_SPEED_CM_PER_SEC,
+                           ticks_per_cm=ENCODER_TICKS_PER_CM,
+                           invert_x=False, invert_y=False,
+                           drift_left_omega=0, drift_right_omega=0,
+                           accel_cm=None, decel_cm=None,
+                           min_speed=None, max_speed=None,
+                           curve_adaptive=True):
+    """纯平移 + 编码器闭环 + 基于距离的速度曲线。
+
+    按加速段→匀速段→减速段分配速度，每段合并为少量编码器步。
+    """
+    if len(points) < 2:
+        return []
+
+    # 参数默认值
+    if accel_cm is None:
+        from .config import PROFILE_ACCEL_CM as accel_cm
+    if decel_cm is None:
+        from .config import PROFILE_DECEL_CM as decel_cm
+    if min_speed is None:
+        from .config import PROFILE_MIN_SPEED as min_speed
+    if max_speed is None:
+        from .config import PROFILE_MAX_SPEED as max_speed
+
+    total = _path_total_length(points)
+    if total < 0.1:
+        return [('enc_stop', 0, 0, 0)]
+
+    power = _clamp_power(base_power)
+    curv = compute_curvature(points) if curve_adaptive else [0.0] * len(points)
+
+    seq = []
+    cum_dist = 0.0  # 沿路径累计距离
+
+    for i in range(len(points) - 1):
+        x0, y0 = points[i]
+        x1, y1 = points[i + 1]
+        dx, dy = x1 - x0, y1 - y0
+        seg_len = math.hypot(dx, dy)
+        if seg_len < 1e-6:
+            continue
+
+        # 线段中点位置 + 曲率因子
+        mid_dist = cum_dist + seg_len / 2.0
+        mid_curv = (curv[i] + curv[i + 1]) / 2.0
+        if curve_adaptive:
+            cf = CURVE_SLOWDOWN_FACTOR if mid_curv > CURVATURE_THRESHOLD else STRAIGHT_BOOST_FACTOR
+        else:
+            cf = 1.0
+
+        # 该段平均速度（取中点速度作为代表）
+        avg_speed = _speed_at_position(mid_dist, total, accel_cm, decel_cm,
+                                       min_speed, max_speed, cf)
+        avg_speed = max(min_speed, avg_speed)
+
+        # 方向 + 功率
+        ux, uy = dx / seg_len, dy / seg_len
+        seg_power = power * (avg_speed / max_speed)  # 功率按速度比例缩放
+        seg_power = _clamp_power(seg_power)
+        vx = seg_power * ux
+        vy = seg_power * uy
+        vx, vy, _ = _scale_vector_to_power(vx, vy, seg_power)
+
+        # 漂移补偿
+        w_comp = 0.0
+        if abs(vx) > 1e-6 and (drift_left_omega or drift_right_omega):
+            strength = min(1.0, abs(vx) / max(1, power))
+            if vx < 0:
+                w_comp = drift_left_omega * strength
+            else:
+                w_comp = drift_right_omega * strength
+
+        if invert_x: vx = -vx
+        if invert_y: vy = -vy
+        if invert_x ^ invert_y: w_comp = -w_comp
+
+        ticks = int(round(seg_len * ticks_per_cm))
+        vy_power = int(round(vy))
+        if ticks > 0:
+            seq.append(('enc_move', ticks, vy_power, 0))
+
+        cum_dist += seg_len
+
+    seq.append(('enc_stop', 0, 0, 0))
+    return seq
+
+
+def build_encoder_sequence_heading(points, base_power, omega_power,
+                                   base_speed_cm_s=BASE_SPEED_CM_PER_SEC,
+                                   base_rot_deg_s=BASE_ROT_DEG_PER_SEC,
+                                   ticks_per_cm=ENCODER_TICKS_PER_CM,
+                                   invert_x=False, invert_y=False,
+                                   accel_cm=None, decel_cm=None,
+                                   min_speed=None, max_speed=None):
+    """车头跟随 + 编码器闭环 + 距离速度曲线。"""
+    if len(points) < 2:
+        return []
+
+    if accel_cm is None:
+        from .config import PROFILE_ACCEL_CM as accel_cm
+    if decel_cm is None:
+        from .config import PROFILE_DECEL_CM as decel_cm
+    if min_speed is None:
+        from .config import PROFILE_MIN_SPEED as min_speed
+    if max_speed is None:
+        from .config import PROFILE_MAX_SPEED as max_speed
+
+    total = _path_total_length(points)
+    if total < 0.1:
+        return [('enc_stop', 0, 0, 0)]
+
+    power = _clamp_power(base_power)
+    seq = []
+    heading_deg = 90.0
+    cum_dist = 0.0
+
+    for i in range(len(points) - 1):
+        x0, y0 = points[i]
+        x1, y1 = points[i + 1]
+        dx, dy = x1 - x0, y1 - y0
+        seg_len = math.hypot(dx, dy)
+        if seg_len < 1e-6:
+            continue
+
+        mid_dist = cum_dist + seg_len / 2.0
+        avg_speed = _speed_at_position(mid_dist, total, accel_cm, decel_cm,
+                                       min_speed, max_speed)
+
+        target_deg = math.degrees(math.atan2(dy, dx))
+        delta_deg = _wrap_deg(target_deg - heading_deg)
+
+        # 旋转步
+        if abs(delta_deg) >= ROTATION_DEADBAND_DEG:
+            rot_ticks = int(round(abs(delta_deg) * ticks_per_cm * 0.5))
+            rot_sign = -1 if delta_deg > 0 else 1
+            rot_w = int(round(rot_sign * omega_power))
+            if rot_ticks > 0:
+                seq.append(('enc_rot', rot_ticks, 0, rot_w))
+            heading_deg = target_deg
+
+        # 直走步
+        fwd_ticks = int(round(seg_len * ticks_per_cm))
+        seg_power = power * (avg_speed / max_speed) if max_speed > 0 else power
+        seg_power = _clamp_power(seg_power)
+        vy_power = int(round(seg_power))
+        if invert_y:
+            vy_power = -vy_power
+        if fwd_ticks > 0:
+            seq.append(('enc_move', fwd_ticks, vy_power, 0))
+
+        cum_dist += seg_len
+
+    seq.append(('enc_stop', 0, 0, 0))
+    return seq
+
+
+# ================================================================
+#  旧版时间驱动管线（v4 兼容，保留）
+# ================================================================
 
 
 def _clamp_power(p):
@@ -195,10 +485,80 @@ def round_sequence(seq):
     return out
 
 
+def apply_velocity_ramp(seq, ramp_time=0.25, ramp_steps=5, min_ratio=0.15):
+    """给每个路段插入缓升缓降子步骤，防止高功率起步打滑。
+
+    原理
+    ====
+    把每个 (dur, Vx, Vy, omega) 拆成三个阶段：
+      - 加速段（ramp_time 秒，功率从 min_ratio → 1.0 线性递增）
+      - 匀速段（剩余时间，满功率）
+      - 减速段（ramp_time 秒，功率从 1.0 → min_ratio 线性递减）
+
+    短路段（dur ≤ 2×ramp_time）：走三角形斜坡，先升后降。
+
+    参数
+    ====
+    ramp_time : 加速/减速各占多少秒
+    ramp_steps: 加速/减速各切成几个子步骤（越大越平滑，导出步骤越多）
+    min_ratio : 起始/结束功率比例（0.15=15%，克服静摩擦的最低值）
+
+    返回
+    ====
+    list[tuple]  新的步骤列表，每个子步骤时长均匀、功率线性渐变。
+    """
+    if not seq or ramp_time <= 0 or ramp_steps <= 0:
+        return list(seq)
+
+    result = []
+    for dur, vx, vy, w in seq:
+        # 跳过停止/空步骤
+        if dur <= 0.02 or (vx == 0 and vy == 0 and w == 0):
+            result.append((dur, vx, vy, w))
+            continue
+
+        total_ramp = ramp_time * 2  # 加速 + 减速总时长
+
+        if dur <= total_ramp:
+            # ── 短路段：三角形斜坡 ──
+            half = dur / 2.0
+            for i in range(ramp_steps * 2):
+                t = (i + 0.5) / (ramp_steps * 2)  # 子步骤中点位置 0→1
+                if t < 0.5:
+                    ratio = min_ratio + (1.0 - min_ratio) * (t / 0.5)
+                else:
+                    ratio = 1.0 - (1.0 - min_ratio) * ((t - 0.5) / 0.5)
+                sub_dur = dur / (ramp_steps * 2)
+                result.append((
+                    max(0.01, sub_dur),
+                    vx * ratio, vy * ratio, w * ratio
+                ))
+        else:
+            # ── 长路段：加速 → 匀速 → 减速 ──
+            sub_dur = ramp_time / ramp_steps
+            # 加速段
+            for i in range(ramp_steps):
+                ratio = min_ratio + (1.0 - min_ratio) * (i + 0.5) / ramp_steps
+                result.append((max(0.01, sub_dur), vx * ratio, vy * ratio, w * ratio))
+            # 匀速段
+            cruise = dur - total_ramp
+            if cruise > 0.01:
+                result.append((cruise, vx, vy, w))
+            # 减速段
+            for i in range(ramp_steps):
+                ratio = min_ratio + (1.0 - min_ratio) * (ramp_steps - i - 0.5) / ramp_steps
+                result.append((max(0.01, sub_dur), vx * ratio, vy * ratio, w * ratio))
+
+    return result
+
+
 def build_sequence(points, mode, cm_per_s_at_p50, deg_per_s_at_omega50,
                    auto_power, omega_power, invert_x=False, invert_y=False,
-                   drift_left_omega=0, drift_right_omega=0, add_stop=True):
-    """完整管线：模式分发 → 合并 → 漂移补偿（GUI 视角）→ 反转 → 加停止缓冲 → 格式化
+                   drift_left_omega=0, drift_right_omega=0, add_stop=True,
+                   ramp_enabled=True, ramp_time=0.25, ramp_steps=5,
+                   ramp_min_ratio=0.15):
+    """完整管线：模式分发 → 合并 → 漂移补偿（GUI 视角）→ 反转 →
+       缓升缓降 → 格式化 → 停止缓冲
 
     add_stop=False 时不追加 STOP_BUFFER，用于多段合并时每段单独生成。
     补偿在反转之前做。这样无论 invert_x/y 怎么设，drift_left_omega 始终对应
@@ -207,6 +567,9 @@ def build_sequence(points, mode, cm_per_s_at_p50, deg_per_s_at_omega50,
     反转一个轴等于镜像，所以 invert_x 或 invert_y 任一为真都要把 omega 同时取反，
     否则模式 B 车头会反转、补偿 omega 也会颠倒。两者同时为真则等于绕原点 180°
     旋转，omega 不变。
+
+    缓升缓降在每个路段的首尾插入功率渐变子步骤，防止高功率起步打滑。
+    ramp_enabled=False 或 ramp_time=0 时跳过。
     """
     if mode == MODE_TRANSLATION:
         raw = path_to_sequence_translation(points, cm_per_s_at_p50, auto_power)
@@ -245,6 +608,10 @@ def build_sequence(points, mode, cm_per_s_at_p50, deg_per_s_at_omega50,
             w = w * omega_flip
             flipped.append((dur, vx, vy, w))
         merged = flipped
+
+    # 3) 缓升缓降：每段首尾插入功率渐变子步骤
+    if ramp_enabled and ramp_time > 0:
+        merged = apply_velocity_ramp(merged, ramp_time, ramp_steps, ramp_min_ratio)
 
     rounded = round_sequence(merged)
     if add_stop:

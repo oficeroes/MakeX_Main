@@ -72,13 +72,26 @@ class FieldScene(QtWidgets.QGraphicsScene):
         self._grid_items = []
         self._rebuild_grid()
 
-        # 多段路径
+        self._corner_items = []
+        self._rebuild_corners()
+
+        # 多段路径（与 vehicle_ids 保持索引对齐）
         self.path_segments = []         # list[PathItem]
         self.action_chains = []         # list[list[ActionBlockItem]]
+        self.segment_vehicle_ids = []   # list[str]  — 每段对应的 profile_id
         self._drawing = False
         self._drawing_seg = -1
 
-        # 向后兼容的哑元（无段时作为 path_item 返回）
+        # 当前绘制车型（由 MainWindow 在画线前注入）
+        self.active_vehicle_id = "omni3"
+        self.active_vehicle_color = "#2878D0"
+
+        # 哪些车型路径可见（空集 = 全可见）
+        self._hidden_vehicles = set()
+
+        # 共同路径叠加层（OverlapItem 列表）
+        self._overlap_items = []
+
         self._dummy_path = PathItem()
         self.addItem(self._dummy_path)
 
@@ -97,6 +110,7 @@ class FieldScene(QtWidgets.QGraphicsScene):
         self.setSceneRect(0, 0, self._width, self._height)
         self._field_rect.setRect(0, 0, self._width, self._height)
         self._rebuild_grid()
+        self._rebuild_corners()
         self.update()
 
     def field_size(self):
@@ -125,6 +139,33 @@ class FieldScene(QtWidgets.QGraphicsScene):
             self.addItem(line)
             self._grid_items.append(line)
             y += step
+
+    def _rebuild_corners(self):
+        """四个角落 500×500mm 正方形：上方红色、下方蓝色"""
+        for it in self._corner_items:
+            self.removeItem(it)
+        self._corner_items = []
+
+        side = 50.0   # 500 mm
+        red = QtGui.QColor(200, 40, 40, 140)
+        blue = QtGui.QColor(40, 80, 200, 140)
+        pen = QtGui.QPen(QtGui.QColor(0, 0, 0, 80), 0.5)
+
+        corners = [
+            # (x, y, color) — 场景坐标，+Y 朝上
+            (0,                    self._height - side, red),   # 左上（红）
+            (self._width - side,   self._height - side, red),   # 右上（红）
+            (0,                    0,                    blue),  # 左下（蓝）
+            (self._width - side,   0,                    blue),  # 右下（蓝）
+        ]
+        for x, y, color in corners:
+            r = QtWidgets.QGraphicsRectItem(x, y, side, side)
+            r.setBrush(QtGui.QBrush(color))
+            r.setPen(pen)
+            r.setZValue(-98)   # 网格上方、场地下方
+            r.setFlag(QtWidgets.QGraphicsItem.ItemIsSelectable, False)
+            self.addItem(r)
+            self._corner_items.append(r)
 
     # ---- 障碍物 ----
     def add_obstacle(self, x=None, y=None, w=20.0, h=20.0, label=None):
@@ -182,10 +223,11 @@ class FieldScene(QtWidgets.QGraphicsScene):
     # ---- 绘制轨迹 ----
     def start_path(self, scene_pos):
         self._drawing = True
-        seg = PathItem()
+        seg = PathItem(color=self.active_vehicle_color)
         self.addItem(seg)
         self.path_segments.append(seg)
         self.action_chains.append([])
+        self.segment_vehicle_ids.append(self.active_vehicle_id)
         self._drawing_seg = len(self.path_segments) - 1
         seg.append_raw(scene_pos.x(), scene_pos.y())
         seg.preview_raw()
@@ -212,6 +254,7 @@ class FieldScene(QtWidgets.QGraphicsScene):
         seg.set_points(raw, smoothed)
         self._reposition_blocks(idx)
         self._refresh_collision()
+        self.recompute_overlaps()
         self.path_finalized.emit(idx)
 
     def resmooth(self, iterations, step, seg_idx=None):
@@ -235,11 +278,32 @@ class FieldScene(QtWidgets.QGraphicsScene):
         for chain in self.action_chains:
             for block in chain:
                 self.removeItem(block)
+        for ov in self._overlap_items:
+            self.removeItem(ov)
         self.path_segments = []
         self.action_chains = []
+        self.segment_vehicle_ids = []
+        self._overlap_items = []
         self._drawing = False
         self._drawing_seg = -1
         self._refresh_collision()
+
+    # ---- 车型显隐 ----
+    def set_vehicle_visible(self, vehicle_id, visible):
+        """显示或隐藏某个车型的所有路段及其执行块"""
+        if visible:
+            self._hidden_vehicles.discard(vehicle_id)
+        else:
+            self._hidden_vehicles.add(vehicle_id)
+        for idx, seg in enumerate(self.path_segments):
+            vid = self.segment_vehicle_ids[idx] if idx < len(self.segment_vehicle_ids) else ""
+            is_visible = vid not in self._hidden_vehicles
+            seg.setVisible(is_visible)
+            for block in self.action_chains[idx]:
+                block.setVisible(is_visible)
+
+    def is_vehicle_visible(self, vehicle_id):
+        return vehicle_id not in self._hidden_vehicles
 
     # ---- 执行块 ----
     def add_action_block(self, seg_idx, block):
@@ -284,30 +348,124 @@ class FieldScene(QtWidgets.QGraphicsScene):
         return result
 
     def rebuild_from_segments(self, segments_data, action_chains_data=None):
-        """从 JSON 数据重建多段路径 + 执行块"""
+        """从 JSON 数据重建多段路径 + 执行块（含 vehicle_id）"""
         self.clear_path()
         if action_chains_data is None:
             action_chains_data = [[] for _ in segments_data]
 
+        from .config import get_profile
         for seg_data, chain_data in zip(segments_data, action_chains_data):
             raw = [tuple(p) for p in seg_data.get("raw_points_cm", [])]
             smooth = [tuple(p) for p in seg_data.get("smoothed_points_cm", [])]
             if not raw:
                 continue
-            seg = PathItem()
+            vid = seg_data.get("vehicle_id", self.active_vehicle_id)
+            profile = get_profile(vid)
+            seg = PathItem(color=profile.color)
             self.addItem(seg)
             seg.set_points(raw, smooth or raw)
             self.path_segments.append(seg)
+            self.segment_vehicle_ids.append(vid)
+            # 若该车型被隐藏，恢复时也隐藏
+            if vid in self._hidden_vehicles:
+                seg.setVisible(False)
 
             chain = []
             for bd in chain_data:
                 block = ActionBlockItem.from_dict(bd)
                 self.addItem(block)
+                if vid in self._hidden_vehicles:
+                    block.setVisible(False)
                 chain.append(block)
             self.action_chains.append(chain)
             self._reposition_blocks(len(self.path_segments) - 1)
 
         self._refresh_collision()
+        self.recompute_overlaps()
+
+    # ---- 共同路径检测 ----
+    def recompute_overlaps(self, threshold_cm=8.0):
+        """找出不同车型路径中相互靠近的片段，用黄色粗线高亮叠加"""
+        # 清除旧叠加层
+        for ov in self._overlap_items:
+            self.removeItem(ov)
+        self._overlap_items = []
+
+        # 按车型分组，每组收集所有平滑点
+        from collections import defaultdict
+        vehicle_pts = defaultdict(list)   # vehicle_id -> list of (x,y)
+        for idx, seg in enumerate(self.path_segments):
+            vid = self.segment_vehicle_ids[idx] if idx < len(self.segment_vehicle_ids) else ""
+            vehicle_pts[vid].extend(seg.smoothed_points or seg.raw_points)
+
+        vehicles = list(vehicle_pts.keys())
+        if len(vehicles) < 2:
+            return   # 只有一辆车，无需对比
+
+        # 对每对车型找重叠点
+        overlap_pts = []
+        for i in range(len(vehicles)):
+            for j in range(i + 1, len(vehicles)):
+                pts_a = vehicle_pts[vehicles[i]]
+                pts_b = vehicle_pts[vehicles[j]]
+                for ax, ay in pts_a:
+                    for bx, by in pts_b:
+                        if (ax - bx) ** 2 + (ay - by) ** 2 <= threshold_cm ** 2:
+                            overlap_pts.append(((ax + bx) / 2, (ay + by) / 2))
+
+        if not overlap_pts:
+            return
+
+        # 用 DBSCAN 风格简单聚类，把相邻点连成折线段
+        clusters = _cluster_points(overlap_pts, eps=threshold_cm * 1.5)
+        pen = QtGui.QPen(QtGui.QColor(255, 220, 0, 200), 5.0)
+        pen.setCapStyle(QtCore.Qt.RoundCap)
+        pen.setJoinStyle(QtCore.Qt.RoundJoin)
+        for cluster in clusters:
+            if len(cluster) < 2:
+                continue
+            path = QtGui.QPainterPath()
+            path.moveTo(cluster[0][0], cluster[0][1])
+            for x, y in cluster[1:]:
+                path.lineTo(x, y)
+            item = QtWidgets.QGraphicsPathItem(path)
+            item.setPen(pen)
+            item.setZValue(22)   # 在路径上方
+            item.setFlag(QtWidgets.QGraphicsItem.ItemIsSelectable, False)
+            self.addItem(item)
+            self._overlap_items.append(item)
+
+
+def _cluster_points(pts, eps):
+    """简单贪心聚类：把距离 <= eps 的相邻点串成一条折线。
+    返回 list[list[(x,y)]]，每个子列表是一条重叠折线。
+    """
+    if not pts:
+        return []
+    visited = [False] * len(pts)
+    clusters = []
+    for i, (x0, y0) in enumerate(pts):
+        if visited[i]:
+            continue
+        cluster = [(x0, y0)]
+        visited[i] = True
+        # 贪心：从当前末端找最近的未访问点
+        while True:
+            cx, cy = cluster[-1]
+            best_j, best_d2 = -1, eps * eps
+            for j, (xj, yj) in enumerate(pts):
+                if visited[j]:
+                    continue
+                d2 = (cx - xj) ** 2 + (cy - yj) ** 2
+                if d2 <= best_d2:
+                    best_d2 = d2
+                    best_j = j
+            if best_j < 0:
+                break
+            cluster.append(pts[best_j])
+            visited[best_j] = True
+        clusters.append(cluster)
+    return clusters
 
 
 class FieldView(QtWidgets.QGraphicsView):
@@ -325,6 +483,8 @@ class FieldView(QtWidgets.QGraphicsView):
         self.setResizeAnchor(QtWidgets.QGraphicsView.AnchorViewCenter)
         self.setHorizontalScrollBarPolicy(QtCore.Qt.ScrollBarAlwaysOff)
         self.setVerticalScrollBarPolicy(QtCore.Qt.ScrollBarAlwaysOff)
+        # 全视口更新：消除 ItemIsMovable 拖拽时的边框鬼影
+        self.setViewportUpdateMode(QtWidgets.QGraphicsView.FullViewportUpdate)
 
     def resizeEvent(self, event):
         super().resizeEvent(event)
@@ -336,6 +496,12 @@ class FieldView(QtWidgets.QGraphicsView):
 
     def mousePressEvent(self, event):
         if event.button() == QtCore.Qt.LeftButton:
+            # Shift + 拖拽 → 橡皮筋框选
+            if event.modifiers() & QtCore.Qt.ShiftModifier:
+                self.setDragMode(QtWidgets.QGraphicsView.RubberBandDrag)
+                super().mousePressEvent(event)
+                return
+
             item = self.itemAt(event.pos())
             if item is not None and not self._is_background(item):
                 super().mousePressEvent(event)
@@ -350,6 +516,10 @@ class FieldView(QtWidgets.QGraphicsView):
     def mouseMoveEvent(self, event):
         scene_pos = self.mapToScene(event.pos())
         self.scene().mouse_pos_cm.emit(scene_pos.x(), scene_pos.y())
+        # 橡皮筋框选进行中 → Qt 接管
+        if self.dragMode() == QtWidgets.QGraphicsView.RubberBandDrag:
+            super().mouseMoveEvent(event)
+            return
         if event.buttons() & QtCore.Qt.LeftButton and self.scene()._drawing:
             self.scene().extend_path(scene_pos)
             event.accept()
@@ -357,10 +527,17 @@ class FieldView(QtWidgets.QGraphicsView):
         super().mouseMoveEvent(event)
 
     def mouseReleaseEvent(self, event):
-        if event.button() == QtCore.Qt.LeftButton and self.scene()._drawing:
-            self.scene().finish_path()
-            event.accept()
-            return
+        if event.button() == QtCore.Qt.LeftButton:
+            # 橡皮筋框选结束 → 重置为 NoDrag
+            if self.dragMode() == QtWidgets.QGraphicsView.RubberBandDrag:
+                super().mouseReleaseEvent(event)
+                self.setDragMode(QtWidgets.QGraphicsView.NoDrag)
+                event.accept()
+                return
+            if self.scene()._drawing:
+                self.scene().finish_path()
+                event.accept()
+                return
         super().mouseReleaseEvent(event)
 
     @staticmethod

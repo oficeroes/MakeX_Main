@@ -155,6 +155,10 @@ debug_mode = False
 debug_motor_type = 0
 debug_motor_index = 0
 
+# ==================== 编码器标定（GUI 导出 'encoder_cal' 触发） ====================
+enc_cal_deltas = [0, 0, 0, 0]  # M1, M2, M3, M4 编码器增量（标定结束后可查询）
+enc_cal_ready = False            # True = 标定结果就绪，N1-N4 可查询增量
+
 
 # ==================== 运动学函数 ====================
 def mecanum_kinematics(Vx, Vy, omega):
@@ -224,6 +228,7 @@ last_Left = False
 last_Right = False
 last_N2 = False
 last_N3 = False
+last_N4 = False
 
 # ==================== 启动确认 ====================
 print("=" * 40)
@@ -243,8 +248,90 @@ while True:
     #  自动模式
     # ================================================================
     if auto_mode:
+        # 获取当前步骤（可能为标准 4 元组或特殊标签元组）
+        step = AUTO_SEQUENCE[auto_step]
+
+        # --- 特殊标签步骤（第一个元素是字符串） ---
+        if isinstance(step[0], str):
+            tag = step[0]
+            if tag == 'encoder_cal':
+                # 编码器标定：记录编码值 → 直走 → 计算增量
+                _, cal_dur, cal_Vx, cal_Vy, cal_omega = step  # 5 元组
+                if auto_step == 0 or not hasattr(__motor_M1, '_enc_cal_started'):
+                    # 第一步：记录初始编码值（存在电机对象上跨迭代保留）
+                    __motor_M1._enc_cal_M1_start = __motor_M1.get_value("angle")
+                    __motor_M2._enc_cal_M2_start = __motor_M2.get_value("angle")
+                    __motor_M3._enc_cal_M3_start = __motor_M3.get_value("angle")
+                    __motor_M4._enc_cal_M4_start = __motor_M4.get_value("angle")
+                    auto_step_start = novapi.timer()
+                    __motor_M1._enc_cal_started = True
+                    print(">>> 编码器标定开始！记录初始编码 M1=%.0f M2=%.0f M3=%.0f M4=%.0f" %
+                          (__motor_M1._enc_cal_M1_start, __motor_M2._enc_cal_M2_start,
+                           __motor_M3._enc_cal_M3_start, __motor_M4._enc_cal_M4_start))
+                    __led.show("CAL")
+
+                elapsed = novapi.timer() - auto_step_start
+                if elapsed >= cal_dur:
+                    # 标定完成：记录结束编码值并计算增量
+                    M1_end = __motor_M1.get_value("angle")
+                    M2_end = __motor_M2.get_value("angle")
+                    M3_end = __motor_M3.get_value("angle")
+                    M4_end = __motor_M4.get_value("angle")
+                    enc_cal_deltas[0] = int(M1_end - __motor_M1._enc_cal_M1_start)
+                    enc_cal_deltas[1] = int(M2_end - __motor_M2._enc_cal_M2_start)
+                    enc_cal_deltas[2] = int(M3_end - __motor_M3._enc_cal_M3_start)
+                    enc_cal_deltas[3] = int(M4_end - __motor_M4._enc_cal_M4_start)
+                    enc_cal_ready = True
+                    stop_all_motors()
+                    auto_mode = False
+                    auto_step = 0
+                    if hasattr(__motor_M1, '_enc_cal_started'):
+                        delattr(__motor_M1, '_enc_cal_started')
+                    __led.show("done")
+                    print(">>> 编码器标定完成！增量: M1=%d M2=%d M3=%d M4=%d" %
+                          (enc_cal_deltas[0], enc_cal_deltas[1],
+                           enc_cal_deltas[2], enc_cal_deltas[3]))
+                    print("    按 N1/N2/N3/N4 在 LED 查看各电机增量（E####）")
+                else:
+                    # 执行标定移动：直走
+                    M1_power, M2_power, M3_power, M4_power = mecanum_kinematics(
+                        cal_Vx, cal_Vy, cal_omega)
+                    __motor_M1.set_power(M1_power)
+                    __motor_M2.set_power(M2_power)
+                    __motor_M3.set_power(M3_power)
+                    __motor_M4.set_power(M4_power)
+            elif tag == 'delay':
+                _, delay_dur = step[0], step[1]
+                if auto_step == 0 or '_delay_start' not in str(type(__motor_M1)):
+                    auto_step_start = novapi.timer()
+                if novapi.timer() - auto_step_start >= delay_dur:
+                    auto_step += 1
+                    auto_step_start = novapi.timer()
+                    print(">>> 延时 %.1fs 完成" % delay_dur)
+            elif tag == 'servo':
+                print(">>> 舵机步骤（跳过）: %r" % (step,))
+                auto_step += 1
+                auto_step_start = novapi.timer()
+            else:
+                print(">>> 未知步骤标签 %s，跳过" % tag)
+                auto_step += 1
+                auto_step_start = novapi.timer()
+
+            if auto_step >= len(AUTO_SEQUENCE):
+                stop_all_motors()
+                auto_mode = False
+                auto_step = 0
+                auto_prev_Vx = 0.0
+                auto_prev_Vy = 0.0
+                auto_prev_omega = 0.0
+                print(">>> 自动程序完成")
+
+            time.sleep(AUTO_STEP_DELAY)
+            continue
+
+        # --- 标准运动步骤（4 元组） ---
+        step_duration, step_Vx, step_Vy, step_omega = step
         elapsed = novapi.timer() - auto_step_start
-        step_duration, step_Vx, step_Vy, step_omega = AUTO_SEQUENCE[auto_step]
 
         if elapsed >= step_duration:
             # 记录本步结束时的稳态速度作为下次插值起点
@@ -263,9 +350,14 @@ while True:
                 print(">>> 自动程序完成，恢复遥控")
             else:
                 auto_step_start = novapi.timer()
-                next_dur, next_Vx, next_Vy, next_omega = AUTO_SEQUENCE[auto_step]
-                print(">>> 自动步骤 %d/%d: Vx=%d Vy=%d w=%d (%.1fs)" %
-                      (auto_step + 1, len(AUTO_SEQUENCE), next_Vx, next_Vy, next_omega, next_dur))
+                next_step = AUTO_SEQUENCE[auto_step]
+                if isinstance(next_step[0], str):
+                    print(">>> 自动步骤 %d/%d: %s" %
+                          (auto_step + 1, len(AUTO_SEQUENCE), next_step[0]))
+                else:
+                    next_dur, next_Vx, next_Vy, next_omega = next_step
+                    print(">>> 自动步骤 %d/%d: Vx=%d Vy=%d w=%d (%.1fs)" %
+                          (auto_step + 1, len(AUTO_SEQUENCE), next_Vx, next_Vy, next_omega, next_dur))
         else:
             # 步间速度线性插值（前 AUTO_RAMP_MS 毫秒）
             if AUTO_RAMP_MS > 0 and elapsed * 1000.0 < AUTO_RAMP_MS:
@@ -299,6 +391,7 @@ while True:
         cur_N2 = gamepad.is_key_pressed("N2")
         cur_N3 = gamepad.is_key_pressed("N3")
         cur_Menu = gamepad.is_key_pressed("≡")
+        cur_Plus = gamepad.is_key_pressed("+")
 
         if cur_Menu and not last_Menu:
             debug_stop_motor()
@@ -307,6 +400,35 @@ while True:
             __led.show("MecX")
             print(">>> 退出调试模式")
             last_Menu = cur_Menu
+            time.sleep(0.3)
+            continue
+
+        # --- + 键：退出调试并启动自动程序（编码器标定等） ---
+        if cur_Plus and not last_Plus:
+            debug_stop_motor()
+            debug_mode = False
+            stop_all_motors()
+            enc_cal_ready = False
+            enc_cal_deltas = [0, 0, 0, 0]
+            auto_mode = True
+            auto_step = 0
+            auto_step_start = novapi.timer()
+            auto_prev_Vx = 0.0
+            auto_prev_Vy = 0.0
+            auto_prev_omega = 0.0
+            step0 = AUTO_SEQUENCE[0]
+            if isinstance(step0[0], str):
+                print(">>> 自动程序启动（从调试模式）！步骤 1/%d: %s" %
+                      (len(AUTO_SEQUENCE), step0[0]))
+            else:
+                dur0, Vx0, Vy0, w0 = step0
+                print(">>> 自动程序启动（从调试模式）！步骤 1/%d: Vx=%d Vy=%d w=%d (%.1fs)" %
+                      (len(AUTO_SEQUENCE), Vx0, Vy0, w0, dur0))
+            __led.show("auto")
+            last_Up = last_Down = last_Left = last_Right = False
+            last_N1 = last_N2 = last_N3 = False
+            last_Menu = cur_Menu
+            last_Plus = cur_Plus
             time.sleep(0.3)
             continue
 
@@ -368,6 +490,9 @@ while True:
     cur_Plus = gamepad.is_key_pressed("+")
     cur_Menu = gamepad.is_key_pressed("≡")
     cur_N1 = gamepad.is_key_pressed("N1")
+    cur_N2 = gamepad.is_key_pressed("N2")
+    cur_N3 = gamepad.is_key_pressed("N3")
+    cur_N4 = gamepad.is_key_pressed("N4")
 
     if cur_Menu and not last_Menu:
         if debug_mode:
@@ -388,6 +513,7 @@ while True:
             print("  >>> 进入调试模式！")
             print("  ↑↓ 切换电机类型 | ← → 切换电机编号")
             print("  N1=+50  N2=-50  |  N2+N3=退出")
+            print("  + =自动程序（编码器标定等）")
             print("=" * 40)
         last_Menu = cur_Menu
         time.sleep(0.3)
@@ -400,10 +526,33 @@ while True:
         auto_prev_Vx = 0.0
         auto_prev_Vy = 0.0
         auto_prev_omega = 0.0
-        dur0, Vx0, Vy0, w0 = AUTO_SEQUENCE[0]
-        print(">>> 自动程序启动！步骤 1/%d: Vx=%d Vy=%d w=%d (%.1fs)" %
-              (len(AUTO_SEQUENCE), Vx0, Vy0, w0, dur0))
-    if cur_N1 and not last_N1:
+        # 清除编码器标定旧数据
+        enc_cal_ready = False
+        enc_cal_deltas = [0, 0, 0, 0]
+        # 安全打印第一步信息
+        step0 = AUTO_SEQUENCE[0]
+        if isinstance(step0[0], str):
+            print(">>> 自动程序启动！步骤 1/%d: %s" %
+                  (len(AUTO_SEQUENCE), step0[0]))
+        else:
+            dur0, Vx0, Vy0, w0 = step0
+            print(">>> 自动程序启动！步骤 1/%d: Vx=%d Vy=%d w=%d (%.1fs)" %
+                  (len(AUTO_SEQUENCE), Vx0, Vy0, w0, dur0))
+    # N1/N2/N3/N4：编码器标定后查看增量（LED 显示 E####）
+    if enc_cal_ready:
+        if cur_N1 and not last_N1:
+            __led.show("E%d" % enc_cal_deltas[0])
+            print(">>> M1 编码增量: %d" % enc_cal_deltas[0])
+        elif cur_N2 and not last_N2:
+            __led.show("E%d" % enc_cal_deltas[1])
+            print(">>> M2 编码增量: %d" % enc_cal_deltas[1])
+        elif cur_N3 and not last_N3:
+            __led.show("E%d" % enc_cal_deltas[2])
+            print(">>> M3 编码增量: %d" % enc_cal_deltas[2])
+        elif cur_N4 and not last_N4:
+            __led.show("E%d" % enc_cal_deltas[3])
+            print(">>> M4 编码增量: %d" % enc_cal_deltas[3])
+    elif cur_N1 and not last_N1:
         collector_on = not collector_on
         if collector_on:
             power_expand_board.set_power(DC_COLLECTOR_PORT, DC_COLLECTOR_SPEED)
@@ -415,6 +564,9 @@ while True:
     last_Plus = cur_Plus
     last_Menu = cur_Menu
     last_N1 = cur_N1
+    last_N2 = cur_N2
+    last_N3 = cur_N3
+    last_N4 = cur_N4
 
     Lx = apply_dead_zone(Lx)
     Ly = apply_dead_zone(Ly)

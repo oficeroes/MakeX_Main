@@ -29,6 +29,12 @@ from .main_window import MainWindow
 def main():
     app = QtWidgets.QApplication(sys.argv)
     app.setStyle("Fusion")
+
+    # 全局字体加大：用于 4K / 高 DPI 屏幕可读性
+    font = app.font()
+    font.setPointSize(11)
+    app.setFont(font)
+
     win = MainWindow()
     win.show()
     sys.exit(app.exec_())

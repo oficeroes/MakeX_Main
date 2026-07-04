@@ -46,14 +46,15 @@ class PathItem(QtWidgets.QGraphicsPathItem):
     COLOR_NORMAL = QtGui.QColor(40, 120, 220)
     COLOR_COLLIDE = QtGui.QColor(220, 60, 60)
 
-    def __init__(self):
+    def __init__(self, color=None):
         super().__init__()
-        self.raw_points = []        # 原始鼠标采样点（cm）
-        self.smoothed_points = []   # 平滑后的点（cm）
+        self.raw_points = []
+        self.smoothed_points = []
         self._collide = False
+        # 车型颜色（None → 使用默认蓝）
+        self._vehicle_color = QtGui.QColor(color) if color else None
         self._configure_pen()
         self.setZValue(20)
-        # 允许选中（选中后可用 Del 删除）
         self.setFlag(QtWidgets.QGraphicsItem.ItemIsSelectable, True)
 
         # 起点 / 终点小圆圈
@@ -68,11 +69,16 @@ class PathItem(QtWidgets.QGraphicsPathItem):
         self._end_marker.setZValue(21)
 
     def _configure_pen(self):
-        color = self.COLOR_COLLIDE if self._collide else self.COLOR_NORMAL
-        # 选中时加粗、半透明橙色覆盖
-        if self.isSelected():
-            color = QtGui.QColor(255, 160, 0)
-        pen = QtGui.QPen(color, PATH_PEN_WIDTH_CM * (1.8 if self.isSelected() else 1.0))
+        if self._collide:
+            color = self.COLOR_COLLIDE
+        elif self.isSelected():
+            color = QtGui.QColor(255, 160, 0)   # 橙色高亮
+        elif self._vehicle_color:
+            color = self._vehicle_color
+        else:
+            color = self.COLOR_NORMAL
+        width = PATH_PEN_WIDTH_CM * (1.8 if self.isSelected() else 1.0)
+        pen = QtGui.QPen(color, width)
         pen.setCapStyle(QtCore.Qt.RoundCap)
         pen.setJoinStyle(QtCore.Qt.RoundJoin)
         self.setPen(pen)

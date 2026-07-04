@@ -70,9 +70,27 @@ from .config import (
     CHASSIS_PROFILES,
     DEFAULT_PROFILE_ID,
     get_profile,
+    WHEEL_CIRCUMFERENCE_CM,
+    RAMP_ENABLED,
+    DEFAULT_RAMP_TIME,
+    DEFAULT_RAMP_STEPS,
+    DEFAULT_RAMP_MIN_RATIO,
+    BASE_SPEED_CM_PER_SEC,
+    BASE_ROT_DEG_PER_SEC,
+    ENCODER_TICKS_PER_CM,
+    CURVE_SLOWDOWN_FACTOR,
+    STRAIGHT_BOOST_FACTOR,
+    PROFILE_ACCEL_CM,
+    PROFILE_DECEL_CM,
+    PROFILE_MAX_SPEED,
+    PROFILE_MIN_SPEED,
+    PROFILE_ROT_SPEED,
+    PROFILE_ROT_ACCEL_DEG,
+    PROFILE_ROT_DECEL_DEG,
+    PROFILE_CURVE_ADAPTIVE,
 )
 from .field_view import FieldScene, FieldView
-from .kinematics import build_sequence
+from .kinematics import build_sequence, build_encoder_sequence, build_encoder_sequence_heading
 from .file_io import build_payload, save_trajectory, load_trajectory, next_filename
 from .exporter import write_auto_sequence
 from .obstacle_item import ObstacleItem
@@ -100,6 +118,8 @@ class MainWindow(QtWidgets.QMainWindow):
         self._build_statusbar()
         self._wire_signals()
         self._refresh_title()
+        # 初始化场景当前绘制车型
+        self._sync_active_vehicle()
 
     # ---- 工具栏 ----
     def _build_toolbar(self):
@@ -171,10 +191,6 @@ class MainWindow(QtWidgets.QMainWindow):
                 child.setStyleSheet("QToolButton { color: #1a6b1a; font-weight: bold; }")
                 break
 
-        act_calib = tb.addAction("📏 标定测试")
-        act_calib.setToolTip("导出 2 秒直走测试段，用尺子量距离反推速度标定值")
-        act_calib.triggered.connect(self.on_calibration_export)
-
         tb.addSeparator()
 
         # 画布操作
@@ -190,6 +206,54 @@ class MainWindow(QtWidgets.QMainWindow):
         act_clear_path = tb.addAction("✕ 清空轨迹")
         act_clear_path.setToolTip("清除当前画的轨迹（不影响障碍物）")
         act_clear_path.triggered.connect(self.on_clear_path)
+
+        # ---- 第二工具栏：多车叠加视图 ----
+        tb2 = self.addToolBar("多车叠加")
+        tb2.setMovable(False)
+        tb2.setToolButtonStyle(QtCore.Qt.ToolButtonTextOnly)
+
+        lbl_mv = QtWidgets.QLabel("  多车视图: ")
+        lbl_mv.setStyleSheet("font-weight:bold; color:#333;")
+        tb2.addWidget(lbl_mv)
+
+        self._vehicle_btns = {}   # profile_id -> QToolButton
+        for p in CHASSIS_PROFILES:
+            btn = QtWidgets.QToolButton()
+            btn.setText(p.display_name)
+            btn.setCheckable(True)
+            btn.setChecked(True)
+            btn.setStyleSheet(
+                "QToolButton { border:2px solid %s; border-radius:4px;"
+                " padding:2px 6px; margin:1px; }"
+                "QToolButton:checked { background:%s; color:white; }"
+                "QToolButton:!checked { background:#ddd; color:#666; }" % (p.color, p.color)
+            )
+            btn.setToolTip("显示/隐藏「%s」的路径" % p.display_name)
+            btn.toggled.connect(lambda checked, pid=p.profile_id:
+                                self._on_vehicle_visibility(pid, checked))
+            tb2.addWidget(btn)
+            self._vehicle_btns[p.profile_id] = btn
+
+        tb2.addSeparator()
+
+        # 重叠阈值调节
+        tb2.addWidget(QtWidgets.QLabel(" 重叠阈值: "))
+        self.sp_overlap_thresh = QtWidgets.QDoubleSpinBox()
+        self.sp_overlap_thresh.setRange(2, 50)
+        self.sp_overlap_thresh.setValue(8.0)
+        self.sp_overlap_thresh.setSuffix(" cm")
+        self.sp_overlap_thresh.setFixedWidth(80)
+        self.sp_overlap_thresh.setToolTip("两车路径被认为重叠的最大距离（cm）")
+        self.sp_overlap_thresh.valueChanged.connect(
+            lambda _: self.scene.recompute_overlaps(self.sp_overlap_thresh.value()))
+        tb2.addWidget(self.sp_overlap_thresh)
+
+        btn_recompute = QtWidgets.QToolButton()
+        btn_recompute.setText("刷新重叠")
+        btn_recompute.setToolTip("重新计算并高亮所有车型的共同路段")
+        btn_recompute.clicked.connect(
+            lambda: self.scene.recompute_overlaps(self.sp_overlap_thresh.value()))
+        tb2.addWidget(btn_recompute)
 
     # ---- 右侧控件 ----
     def _build_dock(self):
@@ -218,20 +282,6 @@ class MainWindow(QtWidgets.QMainWindow):
         )
         outer.addWidget(self.lbl_chassis_desc)
 
-        # --- 场地尺寸 ---
-        g_field = QtWidgets.QGroupBox("场地尺寸")
-        f_field = QtWidgets.QFormLayout(g_field)
-        f_field.setRowWrapPolicy(QtWidgets.QFormLayout.DontWrapRows)
-        self.sp_field_w = QtWidgets.QDoubleSpinBox()
-        self.sp_field_w.setRange(50, 1500); self.sp_field_w.setDecimals(0)
-        self.sp_field_w.setValue(DEFAULT_FIELD_WIDTH_CM); self.sp_field_w.setSuffix(" cm")
-        self.sp_field_h = QtWidgets.QDoubleSpinBox()
-        self.sp_field_h.setRange(50, 1500); self.sp_field_h.setDecimals(0)
-        self.sp_field_h.setValue(DEFAULT_FIELD_HEIGHT_CM); self.sp_field_h.setSuffix(" cm")
-        f_field.addRow("宽:", self.sp_field_w)
-        f_field.addRow("高:", self.sp_field_h)
-        outer.addWidget(g_field)
-
         # --- 运动参数（合并最重要的参数） ---
         g_motion = QtWidgets.QGroupBox("运动参数")
         f_motion = QtWidgets.QFormLayout(g_motion)
@@ -258,6 +308,47 @@ class MainWindow(QtWidgets.QMainWindow):
         self.btn_mode.clicked.connect(self._on_toggle_mode)
         f_motion.addRow(self.btn_mode)
 
+        # ── 速度曲线（替代旧"基准速度"滑块）──
+        g_speed = QtWidgets.QGroupBox("速度曲线")
+        f_speed = QtWidgets.QFormLayout(g_speed)
+
+        self.sp_accel_cm = QtWidgets.QDoubleSpinBox()
+        self.sp_accel_cm.setRange(0, 200); self.sp_accel_cm.setDecimals(1); self.sp_accel_cm.setSuffix(" cm")
+        self.sp_accel_cm.setValue(PROFILE_ACCEL_CM); self.sp_accel_cm.setSingleStep(5)
+        self.sp_accel_cm.setToolTip("路径开头多少 cm 用于加速（0=禁用）")
+        f_speed.addRow("加速距离:", self.sp_accel_cm)
+
+        self.sp_decel_cm = QtWidgets.QDoubleSpinBox()
+        self.sp_decel_cm.setRange(0, 200); self.sp_decel_cm.setDecimals(1); self.sp_decel_cm.setSuffix(" cm")
+        self.sp_decel_cm.setValue(PROFILE_DECEL_CM); self.sp_decel_cm.setSingleStep(5)
+        self.sp_decel_cm.setToolTip("路径结尾多少 cm 用于减速（0=禁用）")
+        f_speed.addRow("减速距离:", self.sp_decel_cm)
+
+        self.sp_max_speed = QtWidgets.QDoubleSpinBox()
+        self.sp_max_speed.setRange(5, 100); self.sp_max_speed.setDecimals(1); self.sp_max_speed.setSuffix(" cm/s")
+        self.sp_max_speed.setValue(PROFILE_MAX_SPEED); self.sp_max_speed.setSingleStep(5)
+        self.sp_max_speed.setToolTip("匀速段最高速度。路径太短时自动切换三角形曲线")
+        f_speed.addRow("最大速度:", self.sp_max_speed)
+
+        self.sp_min_speed = QtWidgets.QDoubleSpinBox()
+        self.sp_min_speed.setRange(3, 50); self.sp_min_speed.setDecimals(1); self.sp_min_speed.setSuffix(" cm/s")
+        self.sp_min_speed.setValue(PROFILE_MIN_SPEED); self.sp_min_speed.setSingleStep(2)
+        self.sp_min_speed.setToolTip("加速起点 / 减速终点最低速度（克服静摩擦）")
+        f_speed.addRow("最小速度:", self.sp_min_speed)
+
+        self.sp_rot_speed = QtWidgets.QDoubleSpinBox()
+        self.sp_rot_speed.setRange(10, 360); self.sp_rot_speed.setDecimals(0); self.sp_rot_speed.setSuffix(" °/s")
+        self.sp_rot_speed.setValue(PROFILE_ROT_SPEED); self.sp_rot_speed.setSingleStep(10)
+        self.sp_rot_speed.setToolTip("自旋最高角速度（用于车头跟随模式）")
+        f_speed.addRow("旋转速度:", self.sp_rot_speed)
+
+        self.chk_curve = QtWidgets.QCheckBox("曲率自适应（弯减速/直加速）")
+        self.chk_curve.setChecked(PROFILE_CURVE_ADAPTIVE)
+        self.chk_curve.setToolTip("勾选：转弯自动降速 10%，直线自动提速 5%")
+        f_speed.addRow(self.chk_curve)
+
+        outer.addWidget(g_speed)
+
         # 轴反转（两个 checkbox 放一行）
         inv_row = QtWidgets.QWidget()
         inv_h = QtWidgets.QHBoxLayout(inv_row)
@@ -272,22 +363,121 @@ class MainWindow(QtWidgets.QMainWindow):
         inv_h.addWidget(self.chk_invert_y)
         inv_h.addStretch()
         f_motion.addRow("轴反转:", inv_row)
+
+        # 缓升缓降（防止起步打滑）
+        ramp_row = QtWidgets.QWidget()
+        ramp_h = QtWidgets.QHBoxLayout(ramp_row)
+        ramp_h.setContentsMargins(0, 0, 0, 0); ramp_h.setSpacing(4)
+        self.chk_ramp = QtWidgets.QCheckBox("缓升缓降")
+        self.chk_ramp.setToolTip(
+            "在每个路段首尾插入功率渐变子步骤，避免高功率起步打滑。\n"
+            "勾选后导出时自动拆分每段为 加速→匀速→减速 三段")
+        self.chk_ramp.setChecked(RAMP_ENABLED)
+        ramp_h.addWidget(self.chk_ramp)
+        ramp_h.addStretch()
+        f_motion.addRow(ramp_row)
+
+        # 缓升参数行：过渡时长 / 子步数
+        ramp_param_row = QtWidgets.QWidget()
+        ramp_param_h = QtWidgets.QHBoxLayout(ramp_param_row)
+        ramp_param_h.setContentsMargins(0, 0, 0, 0); ramp_param_h.setSpacing(4)
+        self.sp_ramp_time = QtWidgets.QDoubleSpinBox()
+        self.sp_ramp_time.setRange(0.05, 1.0); self.sp_ramp_time.setDecimals(2)
+        self.sp_ramp_time.setValue(DEFAULT_RAMP_TIME); self.sp_ramp_time.setSingleStep(0.05)
+        self.sp_ramp_time.setSuffix("s")
+        self.sp_ramp_time.setToolTip("加速/减速各占多少秒。0.25s=推荐，0.1s=快速，0.5s=最柔和")
+        self.sp_ramp_steps = QtWidgets.QSpinBox()
+        self.sp_ramp_steps.setRange(2, 12)
+        self.sp_ramp_steps.setValue(DEFAULT_RAMP_STEPS)
+        self.sp_ramp_steps.setToolTip("加速/减速各切成几个子步骤。越多越平滑，导出步骤也越多")
+        ramp_param_h.addWidget(QtWidgets.QLabel("时长"))
+        ramp_param_h.addWidget(self.sp_ramp_time)
+        ramp_param_h.addWidget(QtWidgets.QLabel("步数"))
+        ramp_param_h.addWidget(self.sp_ramp_steps)
+        f_motion.addRow(ramp_param_row)
+
         outer.addWidget(g_motion)
 
         # --- 速度标定 ---
         g_cal = QtWidgets.QGroupBox("速度标定")
-        f_cal = QtWidgets.QFormLayout(g_cal)
+        v_cal = QtWidgets.QVBoxLayout(g_cal)
+        v_cal.setSpacing(6)
+        f_cal = QtWidgets.QFormLayout()
+        f_cal.setFieldGrowthPolicy(QtWidgets.QFormLayout.AllNonFixedFieldsGrow)
+
+        # P50 直行速度
         self.sp_cm_per_s = QtWidgets.QDoubleSpinBox()
         self.sp_cm_per_s.setRange(1, 300); self.sp_cm_per_s.setDecimals(1)
         self.sp_cm_per_s.setValue(DEFAULT_CM_PER_SEC_AT_P50); self.sp_cm_per_s.setSuffix(" cm/s")
-        self.sp_cm_per_s.setToolTip("功率=50 时机器人前进速度（cm/s）。用「标定测试」按钮实测后填入")
+        self.sp_cm_per_s.setToolTip("功率=50 时机器人实测前进速度（cm/s）。编码器标定跑完后用尺子量距离 ÷ 时间填入")
+        f_cal.addRow("P50 直行:", self.sp_cm_per_s)
+
+        # P50 旋转角速度
         self.sp_deg_per_s = QtWidgets.QDoubleSpinBox()
         self.sp_deg_per_s.setRange(5, 720); self.sp_deg_per_s.setDecimals(0)
         self.sp_deg_per_s.setValue(DEFAULT_DEG_PER_SEC_AT_OMEGA50); self.sp_deg_per_s.setSuffix(" °/s")
-        self.sp_deg_per_s.setToolTip("omega=50 时机器人自转角速度（°/s）。车头跟随模式才需要标定")
-        f_cal.addRow("P50 直行:", self.sp_cm_per_s)
+        self.sp_deg_per_s.setToolTip("功率=50 时机器人实测自转角速度（°/s）。让机器人原地自转 360° 计时反算")
         f_cal.addRow("P50 旋转:", self.sp_deg_per_s)
+
+        # 编码器 PPR
+        self.sp_encoder_ppr = QtWidgets.QSpinBox()
+        self.sp_encoder_ppr.setRange(0, 99999)
+        self.sp_encoder_ppr.setSpecialValueText("未知")
+        self.sp_encoder_ppr.setValue(0)
+        self.sp_encoder_ppr.setToolTip("编码器每转一圈的脉冲数（PPR）。通过下方「编码器标定」流程测出后填入")
+        f_cal.addRow("编码器 PPR:", self.sp_encoder_ppr)
+
+        v_cal.addLayout(f_cal)
+
+        # 标定操作按钮行
+        cal_btn_row = QtWidgets.QWidget()
+        cal_btn_h = QtWidgets.QHBoxLayout(cal_btn_row)
+        cal_btn_h.setContentsMargins(0, 0, 0, 0); cal_btn_h.setSpacing(4)
+
+        btn_speed_cal = QtWidgets.QPushButton("📏 速度标定")
+        btn_speed_cal.setToolTip(
+            "向机器人写入 1 秒直走测试段（含 0→50→0 加减速）。\n"
+            "烧录后按 + 键运行，用尺子量走了多少 cm，\n"
+            "填入上方「P50 直行」= 量得距离（cm）。")
+        btn_speed_cal.clicked.connect(self.on_calibration_export)
+        cal_btn_h.addWidget(btn_speed_cal)
+
+        btn_enc_cal = QtWidgets.QPushButton("🔢 编码器标定")
+        btn_enc_cal.setToolTip(
+            "写入编码器标定脚本：记录四轮 encoder delta。\n"
+            "烧录后按 + 键运行，结束后按机器人 N1/N2/N3/N4 键，\n"
+            "LED 显示对应电机编码器增量；再点「录入结果」填回 GUI。")
+        btn_enc_cal.clicked.connect(self.on_encoder_calibration_export)
+        cal_btn_h.addWidget(btn_enc_cal)
+
+        v_cal.addWidget(cal_btn_row)
+
+        # 录入标定结果（编码器标定后填写）
+        cal_enter_row = QtWidgets.QWidget()
+        cal_enter_h = QtWidgets.QHBoxLayout(cal_enter_row)
+        cal_enter_h.setContentsMargins(0, 0, 0, 0); cal_enter_h.setSpacing(4)
+        btn_enter_result = QtWidgets.QPushButton("📥 录入标定结果")
+        btn_enter_result.setToolTip(
+            "从机器人 LED（N1-N4）读到编码器增量后，\n"
+            "在此输入实测距离 D 和增量值 → 自动计算 PPR 和 P50 直行速度。")
+        btn_enter_result.clicked.connect(self.on_enter_calibration_results)
+        cal_enter_h.addWidget(btn_enter_result)
+        v_cal.addWidget(cal_enter_row)
+
+        # 标定结果显示标签（运行后显示推算值）
+        self.lbl_cal_result = QtWidgets.QLabel("（运行编码器标定后可在此录入）")
+        self.lbl_cal_result.setWordWrap(True)
+        self.lbl_cal_result.setStyleSheet(
+            "color: #1a5c1a; font-size: 10px; padding: 4px 6px;"
+            "background: #f0fff0; border: 1px solid #a0d0a0; border-radius: 4px;"
+        )
+        v_cal.addWidget(self.lbl_cal_result)
         outer.addWidget(g_cal)
+
+        # --- 机器人尺寸（只读信息，折叠到小标签） ---
+        lbl_robot_info = QtWidgets.QLabel("机体：长49 × 宽50 cm，轮径Φ10 cm，轮周=31.4 cm")
+        lbl_robot_info.setStyleSheet("color: #777; font-size: 10px; padding: 2px 0;")
+        outer.addWidget(lbl_robot_info)
 
         # --- 高级参数：速度过渡 + 漂移补偿（合并一组） ---
         g_adv = QtWidgets.QGroupBox("高级参数")
@@ -370,9 +560,21 @@ class MainWindow(QtWidgets.QMainWindow):
         btn_add_delay = QtWidgets.QPushButton("⏱ 延时")
         btn_add_delay.setToolTip("在最后一段路径后添加延时块")
         btn_add_delay.clicked.connect(self.on_add_delay_block)
+        btn_add_spin = QtWidgets.QPushButton("⟳ 自旋")
+        btn_add_spin.setToolTip("在最后一段路径后添加自旋 N 度块")
+        btn_add_spin.clicked.connect(self.on_add_spin_block)
+        btn_add_motor = QtWidgets.QPushButton("⚡ 电机")
+        btn_add_motor.setToolTip("设置编码电机持续转动（选 M1-M6 + 功率）")
+        btn_add_motor.clicked.connect(self.on_add_motor_block)
+        btn_add_dc = QtWidgets.QPushButton("🔌 直流")
+        btn_add_dc.setToolTip("设置直流电机持续转动（选 DC1-DC3 + 功率）")
+        btn_add_dc.clicked.connect(self.on_add_dc_motor_block)
         btn_h.addWidget(btn_add_servo)
         btn_h.addWidget(btn_add_drive)
         btn_h.addWidget(btn_add_delay)
+        btn_h.addWidget(btn_add_spin)
+        btn_h.addWidget(btn_add_motor)
+        btn_h.addWidget(btn_add_dc)
         v_seq.addWidget(btn_row)
 
         # 序列树（路段为父节点，block 为子节点）
@@ -452,8 +654,6 @@ class MainWindow(QtWidgets.QMainWindow):
         sb.addPermanentWidget(self._lbl_coord)
 
     def _wire_signals(self):
-        self.sp_field_w.valueChanged.connect(self._on_field_size_changed)
-        self.sp_field_h.valueChanged.connect(self._on_field_size_changed)
         self.scene.selectionChanged.connect(self._on_selection_changed)
         self.scene.path_finalized.connect(self._on_path_finalized)
         self.scene.mouse_pos_cm.connect(self._on_mouse_pos)
@@ -512,10 +712,6 @@ class MainWindow(QtWidgets.QMainWindow):
         self._lbl_status.setText("已重做（还可重做 %d 步）" % len(self._redo_stack))
 
     # ---- 状态同步 ----
-    def _on_field_size_changed(self, *_):
-        self.scene.set_field_size(self.sp_field_w.value(), self.sp_field_h.value())
-        self.view.fitInView(self.scene.sceneRect(), QtCore.Qt.KeepAspectRatio)
-
     def _on_path_finalized(self, seg_idx):
         n_raw = len(self.scene.path_segments[seg_idx].raw_points)
         n_smooth = len(self.scene.path_segments[seg_idx].smoothed_points)
@@ -560,10 +756,22 @@ class MainWindow(QtWidgets.QMainWindow):
         profile_id = self.combo_chassis.currentData()
         return get_profile(profile_id)
 
+    def _sync_active_vehicle(self):
+        """把工具栏选中的底盘同步到场景"""
+        profile = self._current_profile()
+        self.scene.active_vehicle_id = profile.profile_id
+        self.scene.active_vehicle_color = profile.color
+
     def _on_chassis_changed(self, index):
         profile = self._current_profile()
         self.lbl_chassis_desc.setText(profile.description)
         self._refresh_hint_label()
+        self._sync_active_vehicle()
+
+    def _on_vehicle_visibility(self, vehicle_id, visible):
+        """工具栏车型按钮切换 → 显隐该车型的所有路段"""
+        self.scene.set_vehicle_visible(vehicle_id, visible)
+        self._refresh_seq_tree()
 
     def _refresh_hint_label(self):
         profile = self._current_profile()
@@ -643,36 +851,44 @@ class MainWindow(QtWidgets.QMainWindow):
                 robot_file=profile.file_path,
                 source_name=str(self._current_file or "(unsaved)"),
                 mode=self._current_mode(),
-                cm_per_s_at_p50=self.sp_cm_per_s.value(),
+                cm_per_s_at_p50=self.sp_max_speed.value(),
                 auto_power=self.sp_auto_power.value(),
                 ramp_ms=self.sp_ramp_ms.value(),
+                encoder_based=True,
             )
         except Exception as e:
             QtWidgets.QMessageBox.critical(self, "导出失败", str(e))
             return
         QtWidgets.QMessageBox.information(
             self, "导出成功",
-            "已写入 %s\n共 %d 步 | AUTO_RAMP_MS=%d\n备份: %s" % (
-                profile.file_path.name, len(sequence), self.sp_ramp_ms.value(), backup.name),
+            "已写入 %s\n编码器闭环模式 | 共 %d 步\n"
+            "速度曲线: %.0f→%.0f→%.0f cm/s | 加速 %.0fcm 减速 %.0fcm\n备份: %s" % (
+                profile.file_path.name, len(sequence),
+                self.sp_min_speed.value(), self.sp_max_speed.value(), self.sp_min_speed.value(),
+                self.sp_accel_cm.value(), self.sp_decel_cm.value(),
+                backup.name),
         )
         self._lbl_status.setText("导出完成 — %d 步 → %s" % (len(sequence), profile.file_path.name))
 
     def on_calibration_export(self):
-        """生成 2 秒前进的测试段，让用户实测距离反算速度"""
+        """生成 1 秒前进的速度标定测试段（短距离，有加速度渐变防打滑）"""
         profile = self._current_profile()
         if not self._confirm(
-            "将向 %s 写入一段标定测试：\n"
-            "  (2.0s, 0, 50, 0) — 前进 2 秒\n"
-            "  (0.1s, 0, 0, 0)  — 停止\n\n"
-            "运行机器人，用尺子量实际走的距离 D（cm），\n"
-            "然后在「功率50时」填入 D / 2.0。\n\n确认写入？" % profile.file_path.name
+            "速度标定 — 向 %s 写入：\n"
+            "  P50 直行 1 秒（含 0→50→0 加减速防打滑）\n\n"
+            "流程：\n"
+            "  ① 烧录，地上画起跑线\n"
+            "  ② 按 + 键运行（约走 20~40 cm）\n"
+            "  ③ 用尺子量实际走的距离 D（cm）\n"
+            "  ④ 在右侧面板「P50 直行」填入 D\n\n"
+            "确认写入？" % profile.file_path.name
         ):
             return
-        seq = [(2.0, 0, 50, 0), STOP_BUFFER]
+        seq = [(1.0, 0, 50, 0), STOP_BUFFER]
         try:
             backup, _ = write_auto_sequence(
                 seq, robot_file=profile.file_path,
-                source_name="(calibration)",
+                source_name="(speed calibration)",
                 mode="translation",
                 cm_per_s_at_p50=self.sp_cm_per_s.value(),
                 auto_power=50,
@@ -682,10 +898,112 @@ class MainWindow(QtWidgets.QMainWindow):
             QtWidgets.QMessageBox.critical(self, "写入失败", str(e))
             return
         QtWidgets.QMessageBox.information(
-            self, "标定写入成功",
-            "已写入 %s\n备份: %s\nAUTO_RAMP_MS 已设为 0（标定时不插值）\n\n"
-            "烧录后按 + 键运行，量距离反推 cm/s。" % (profile.file_path.name, backup.name),
+            self, "速度标定写入成功",
+            "已写入 %s\n（备份：%s）\n\n"
+            "烧录后按 + 键运行，量距离 D（cm）\n"
+            "→ 在面板「P50 直行」填入 D（走了 1 秒，所以 D = cm/s）"
+            % (profile.file_path.name, backup.name),
         )
+
+    def on_encoder_calibration_export(self):
+        """导出编码器标定脚本：直走并将增量存入机器人 LED 可查询变量"""
+        profile = self._current_profile()
+        if not self._confirm(
+            "编码器标定 — 向 %s 写入：\n"
+            "  记录四轮编码器初始值 → P50 直行 1 秒 → 记录增量\n"
+            "  标定结束后可按机器人 N1/N2/N3/N4 键逐个查看增量\n\n"
+            "流程：\n"
+            "  ① 烧录，地上画起跑线\n"
+            "  ② 按 + 键运行（约走 20~40 cm）\n"
+            "  ③ 用尺子量距离 D（cm）\n"
+            "  ④ 按 N1/N2/N3/N4 查看 LED 上的编码器增量（E####）\n"
+            "  ⑤ 回到 GUI 点「录入标定结果」，填入 D 和四轮增量，自动推算 PPR\n\n"
+            "确认写入？" % profile.file_path.name
+        ):
+            return
+        seq = [("encoder_cal", 1.0, 0, 50, 0), STOP_BUFFER]
+        try:
+            backup, _ = write_auto_sequence(
+                seq, robot_file=profile.file_path,
+                source_name="(encoder calibration)",
+                mode="translation",
+                cm_per_s_at_p50=self.sp_cm_per_s.value(),
+                auto_power=50,
+                ramp_ms=0,
+            )
+        except Exception as e:
+            QtWidgets.QMessageBox.critical(self, "写入失败", str(e))
+            return
+        QtWidgets.QMessageBox.information(
+            self, "编码器标定写入成功",
+            "已写入 %s\n（备份：%s）\n\n"
+            "烧录后：\n"
+            "1. 按 + 键启动，机器人直走约 1 秒后停止\n"
+            "2. 用尺子量距离 D（cm）\n"
+            "3. 按 N1/N2/N3/N4 键，LED 逐个显示四轮编码器增量\n"
+            "   每按一次显示对应电机，格式：E1234\n"
+            "4. 回到 GUI → 右侧面板 → 点「📥 录入标定结果」自动推算"
+            % (profile.file_path.name, backup.name),
+        )
+
+    def on_enter_calibration_results(self):
+        """弹出对话框，填入实测距离和四轮编码器增量，自动推算 PPR 和 P50 直行速度"""
+        dlg = QtWidgets.QDialog(self)
+        dlg.setWindowTitle("录入编码器标定结果")
+        dlg.setMinimumWidth(340)
+        layout = QtWidgets.QFormLayout(dlg)
+
+        sp_dist = QtWidgets.QDoubleSpinBox()
+        sp_dist.setRange(1, 1000); sp_dist.setDecimals(1); sp_dist.setSuffix(" cm")
+        sp_dist.setValue(30.0)
+        sp_dist.setToolTip("机器人实际走的距离（标定结束后用尺子量）")
+        layout.addRow("实测距离 D:", sp_dist)
+
+        sp_m = []
+        for i in range(1, 5):
+            sp = QtWidgets.QSpinBox()
+            sp.setRange(-99999, 99999); sp.setValue(0)
+            sp.setToolTip("按 N%d 后 LED 显示的编码器增量（E#### 中的数字）" % i)
+            layout.addRow("M%d 增量:" % i, sp)
+            sp_m.append(sp)
+
+        btns = QtWidgets.QDialogButtonBox(
+            QtWidgets.QDialogButtonBox.Ok | QtWidgets.QDialogButtonBox.Cancel)
+        btns.accepted.connect(dlg.accept)
+        btns.rejected.connect(dlg.reject)
+        layout.addRow(btns)
+
+        if dlg.exec_() != QtWidgets.QDialog.Accepted:
+            return
+
+        D = sp_dist.value()
+        deltas = [sp.value() for sp in sp_m]
+        valid_deltas = [abs(d) for d in deltas if abs(d) > 0]
+
+        if not valid_deltas or D < 1:
+            QtWidgets.QMessageBox.warning(self, "录入失败", "距离或增量值无效，请重新测量。")
+            return
+
+        avg_delta = sum(valid_deltas) / len(valid_deltas)
+        # 圈数 = 距离 / 轮周长；PPR = 增量 / 圈数
+        wheel_circ = WHEEL_CIRCUMFERENCE_CM  # 31.4159 cm
+        revs = D / wheel_circ
+        ppr_calc = avg_delta / max(revs, 0.001)
+        # P50 直行速度：走了 1 秒
+        cm_per_s = D
+
+        self.sp_encoder_ppr.setValue(int(round(ppr_calc)))
+        self.sp_cm_per_s.setValue(round(cm_per_s, 1))
+
+        delta_str = "  ".join("M%d=%d" % (i + 1, deltas[i]) for i in range(4))
+        self.lbl_cal_result.setText(
+            "标定结果（D=%.1f cm）：\n"
+            "%s\n"
+            "平均增量 %.0f → 推算 PPR=%.0f\n"
+            "P50 直行已更新为 %.1f cm/s"
+            % (D, delta_str, avg_delta, ppr_calc, cm_per_s)
+        )
+        self._lbl_status.setText("标定结果已录入：PPR=%.0f，P50=%.1f cm/s" % (ppr_calc, cm_per_s))
 
     def on_add_obstacle(self):
         size = max(20.0, min(self.scene.field_size()) * 0.1)
@@ -769,6 +1087,15 @@ class MainWindow(QtWidgets.QMainWindow):
     def on_add_delay_block(self):
         self._add_block(ActionBlockItem.TYPE_DELAY)
 
+    def on_add_spin_block(self):
+        self._add_block(ActionBlockItem.TYPE_SPIN)
+
+    def on_add_motor_block(self):
+        self._add_block(ActionBlockItem.TYPE_MOTOR)
+
+    def on_add_dc_motor_block(self):
+        self._add_block(ActionBlockItem.TYPE_DC_MOTOR)
+
     def on_edit_block(self):
         item = self.seq_tree.currentItem()
         if item is None or item.parent() is None:
@@ -818,8 +1145,17 @@ class MainWindow(QtWidgets.QMainWindow):
         self.seq_tree.clear()
         for i, seg in enumerate(self.scene.path_segments):
             n_pts = len(seg.smoothed_points)
+            vid = (self.scene.segment_vehicle_ids[i]
+                   if i < len(self.scene.segment_vehicle_ids) else "")
+            profile = get_profile(vid) if vid else None
+            vname = profile.display_name if profile else "?"
+            vcolor = QtGui.QColor(profile.color) if profile else QtGui.QColor("#555")
+
             seg_item = QtWidgets.QTreeWidgetItem(
-                self.seq_tree, ["路段 %d  (%d 点)" % (i + 1, n_pts)])
+                self.seq_tree,
+                ["[%s]  路段 %d  (%d 点)" % (vname, i + 1, n_pts)]
+            )
+            seg_item.setForeground(0, QtGui.QBrush(vcolor))
             seg_item.setData(0, QtCore.Qt.UserRole, i)
             seg_item.setExpanded(True)
             for block in self.scene.action_chains[i]:
@@ -829,10 +1165,8 @@ class MainWindow(QtWidgets.QMainWindow):
 
     # ---- 构建合并序列 ----
     def _build_combined_sequence(self):
-        """把所有路段 + 执行块按执行顺序合并为 AUTO_SEQUENCE 元组列表"""
+        """只把当前选中车型的路段 + 执行块合并为 AUTO_SEQUENCE（v5 编码器闭环）"""
         seq = []
-        cm_per_s = self.sp_cm_per_s.value()
-        deg_per_s = self.sp_deg_per_s.value()
         auto_power = self.sp_auto_power.value()
         omega_power = self.sp_omega_power.value()
         mode = self._current_mode()
@@ -840,22 +1174,42 @@ class MainWindow(QtWidgets.QMainWindow):
         inv_y = self.chk_invert_y.isChecked()
         drift_l = self.sp_drift_left.value()
         drift_r = self.sp_drift_right.value()
+        accel_cm = self.sp_accel_cm.value()
+        decel_cm = self.sp_decel_cm.value()
+        max_spd = self.sp_max_speed.value()
+        min_spd = self.sp_min_speed.value()
+        rot_spd = self.sp_rot_speed.value()
+        curve_on = self.chk_curve.isChecked()
+        current_vid = self._current_profile().profile_id
 
         for i, seg in enumerate(self.scene.path_segments):
+            vid = (self.scene.segment_vehicle_ids[i]
+                   if i < len(self.scene.segment_vehicle_ids) else "")
+            if vid and vid != current_vid:
+                continue
             if len(seg.smoothed_points) >= 2:
-                seg_seq = build_sequence(
-                    seg.smoothed_points, mode, cm_per_s, deg_per_s,
-                    auto_power, omega_power,
-                    invert_x=inv_x, invert_y=inv_y,
-                    drift_left_omega=drift_l, drift_right_omega=drift_r,
-                    add_stop=False,
-                )
+                if mode == MODE_HEADING:
+                    seg_seq = build_encoder_sequence_heading(
+                        seg.smoothed_points, auto_power, omega_power,
+                        base_speed_cm_s=max_spd, base_rot_deg_s=rot_spd,
+                        invert_x=inv_x, invert_y=inv_y,
+                        accel_cm=accel_cm, decel_cm=decel_cm,
+                        min_speed=min_spd, max_speed=max_spd,
+                    )
+                else:
+                    seg_seq = build_encoder_sequence(
+                        seg.smoothed_points, auto_power,
+                        base_speed_cm_s=max_spd,
+                        invert_x=inv_x, invert_y=inv_y,
+                        drift_left_omega=drift_l, drift_right_omega=drift_r,
+                        accel_cm=accel_cm, decel_cm=decel_cm,
+                        min_speed=min_spd, max_speed=max_spd,
+                        curve_adaptive=curve_on,
+                    )
                 seq.extend(seg_seq)
             for block in self.scene.action_chains[i]:
-                seq.extend(block.to_sequence_steps(cm_per_s, auto_power))
+                seq.extend(block.to_sequence_steps(max_spd, auto_power))
 
-        from .config import STOP_BUFFER
-        seq.append(STOP_BUFFER)
         return seq
 
 
@@ -878,6 +1232,16 @@ class MainWindow(QtWidgets.QMainWindow):
             "invert_y": self.chk_invert_y.isChecked(),
             "ramp_ms": self.sp_ramp_ms.value(),
             "chassis_profile_id": self._current_profile().profile_id,
+            "ramp_enabled": self.chk_ramp.isChecked(),
+            "ramp_time": self.sp_ramp_time.value(),
+            "ramp_steps": self.sp_ramp_steps.value(),
+            # 速度曲线
+            "accel_cm": self.sp_accel_cm.value(),
+            "decel_cm": self.sp_decel_cm.value(),
+            "max_speed": self.sp_max_speed.value(),
+            "min_speed": self.sp_min_speed.value(),
+            "rot_speed": self.sp_rot_speed.value(),
+            "curve_adaptive": self.chk_curve.isChecked(),
         }
         obstacles = [o.to_dict() for o in self.scene.obstacles()]
         path_segments = [
@@ -888,19 +1252,17 @@ class MainWindow(QtWidgets.QMainWindow):
             [block.to_dict() for block in chain]
             for chain in self.scene.action_chains
         ]
-        # 向后兼容：raw/smooth 传第一段（或空）
+        segment_vehicle_ids = list(self.scene.segment_vehicle_ids)
         first_raw = path_segments[0][0] if path_segments else []
         first_smooth = path_segments[0][1] if path_segments else []
         return build_payload(
             w, h, calibration, settings, first_raw, first_smooth, obstacles,
             path_segments=path_segments, action_chains=action_chains,
+            segment_vehicle_ids=segment_vehicle_ids,
         )
 
     def _apply_payload(self, data):
-        field = data.get("field", {})
-        self.sp_field_w.setValue(float(field.get("width_cm", DEFAULT_FIELD_WIDTH_CM)))
-        self.sp_field_h.setValue(float(field.get("height_cm", DEFAULT_FIELD_HEIGHT_CM)))
-
+        # 场地尺寸固定 4655×3055mm，忽略 JSON 中的旧值
         cal = data.get("calibration", {})
         self.sp_cm_per_s.setValue(float(cal.get("cm_per_second_at_power_50", DEFAULT_CM_PER_SEC_AT_P50)))
         self.sp_deg_per_s.setValue(float(cal.get("deg_per_second_at_omega_50", DEFAULT_DEG_PER_SEC_AT_OMEGA50)))
@@ -918,6 +1280,15 @@ class MainWindow(QtWidgets.QMainWindow):
         self.chk_invert_x.setChecked(bool(settings.get("invert_x", DEFAULT_INVERT_X)))
         self.chk_invert_y.setChecked(bool(settings.get("invert_y", DEFAULT_INVERT_Y)))
         self.sp_ramp_ms.setValue(int(settings.get("ramp_ms", DEFAULT_RAMP_MS)))
+        self.chk_ramp.setChecked(bool(settings.get("ramp_enabled", RAMP_ENABLED)))
+        self.sp_ramp_time.setValue(float(settings.get("ramp_time", DEFAULT_RAMP_TIME)))
+        self.sp_ramp_steps.setValue(int(settings.get("ramp_steps", DEFAULT_RAMP_STEPS)))
+        self.sp_accel_cm.setValue(float(settings.get("accel_cm", PROFILE_ACCEL_CM)))
+        self.sp_decel_cm.setValue(float(settings.get("decel_cm", PROFILE_DECEL_CM)))
+        self.sp_max_speed.setValue(float(settings.get("max_speed", PROFILE_MAX_SPEED)))
+        self.sp_min_speed.setValue(float(settings.get("min_speed", PROFILE_MIN_SPEED)))
+        self.sp_rot_speed.setValue(float(settings.get("rot_speed", PROFILE_ROT_SPEED)))
+        self.chk_curve.setChecked(bool(settings.get("curve_adaptive", PROFILE_CURVE_ADAPTIVE)))
         profile_id = settings.get("chassis_profile_id", DEFAULT_PROFILE_ID)
         for i in range(self.combo_chassis.count()):
             if self.combo_chassis.itemData(i) == profile_id:

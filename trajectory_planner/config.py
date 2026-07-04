@@ -43,13 +43,57 @@ from pathlib import Path
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 TRAJECTORIES_DIR = PROJECT_ROOT / "trajectories"
 
-# ===== 画布默认值 =====
-DEFAULT_FIELD_WIDTH_CM = 300.0
-DEFAULT_FIELD_HEIGHT_CM = 300.0
+# ===== 画布默认值（固定场地：4655mm × 3055mm）=====
+DEFAULT_FIELD_WIDTH_CM = 465.5
+DEFAULT_FIELD_HEIGHT_CM = 305.5
+
+# ===== 机器人物理参数 =====
+ROBOT_LENGTH_CM = 49.0            # 小车前后长度（cm）
+ROBOT_WIDTH_CM = 50.0             # 小车左右宽度（cm）
+WHEEL_DIAMETER_CM = 10.0          # 轮子直径（cm）
+WHEEL_CIRCUMFERENCE_CM = 31.4159  # π × 10cm，轮子转一圈走的距离
+ENCODER_PPR = None                # 编码器每转脉冲数（待标定，填了才启用闭环）
+ENCODER_PULSES_PER_CM = None      # 1 cm = 多少编码脉冲（PPR / 周长，自动推算）
+
+# ===== 闭环控制参数（编码器 PID） =====
+# 编码器 → 距离换算：1 cm = 多少 encoder ticks（get_count() 返回值）
+# 用户自行标定后填入，填了才启用闭环模式
+ENCODER_TICKS_PER_CM = 18.0       # 默认值（约 1000°/58cm ≈ 17.2°，用 get_count 的 tick 单位）
+
+# PID 控制器增益
+PID_KP = 0.35                     # 比例系数：位置误差 → 功率修正
+PID_KI = 0.02                     # 积分系数：消除稳态误差
+PID_KD = 0.08                     # 微分系数：抑制超调
+PID_INTEGRAL_MAX = 30.0           # 积分上限（防止积分饱和）
+
+# 梯形速度曲线参数（机器人端执行）
+PROFILE_ACCEL_TICKS = 80          # 加速段长度（encoder ticks），越大越柔和
+PROFILE_CRUISE_MIN = 30           # 最低巡航速度（power %），防止静摩擦
+PROFILE_DEADBAND_TICKS = 8        # 到位死区（ticks），小于此值视为到达
+
+# ===== 速度曲线参数（用户可调） =====
+# 整个路径分为三段：加速段 → 匀速段 → 减速段
+# 加速段和减速段按"距离"定义（cm），而非时间，确保物理一致性
+PROFILE_ACCEL_CM = 25.0           # 路径开头多少 cm 用于加速（0=禁用）
+PROFILE_DECEL_CM = 25.0           # 路径结尾多少 cm 用于减速（0=禁用）
+PROFILE_MAX_SPEED = 40.0          # 匀速段最高速度（cm/s）
+PROFILE_MIN_SPEED = 10.0          # 加速起点 / 减速终点的最低速度（cm/s），克服静摩擦
+PROFILE_ROT_SPEED = 60.0          # 旋转最高角速度（°/s）
+PROFILE_ROT_ACCEL_DEG = 30.0      # 旋转加速段长度（度）
+PROFILE_ROT_DECEL_DEG = 30.0      # 旋转减速段长度（度）
+PROFILE_CURVE_ADAPTIVE = True     # 是否启用曲率自适应（弯减速 10%，直加速 5%）
+
+# 曲率自适应倍率（内部使用）
+CURVE_SLOWDOWN_FACTOR = 0.90
+STRAIGHT_BOOST_FACTOR = 1.05
+CURVATURE_THRESHOLD = 0.08
+# 向后兼容别名
+BASE_SPEED_CM_PER_SEC = PROFILE_MAX_SPEED
+BASE_ROT_DEG_PER_SEC = PROFILE_ROT_SPEED
 
 # ===== 速度标定默认值 =====
-DEFAULT_CM_PER_SEC_AT_P50 = 30.0      # 功率=50 时机器人沿轴速度（cm/s）
-DEFAULT_DEG_PER_SEC_AT_OMEGA50 = 90.0 # omega=50 时机器人自转角速度（deg/s）
+DEFAULT_CM_PER_SEC_AT_P50 = 30.0      # 功率=50 时机器人实测沿轴速度（cm/s），待标定
+DEFAULT_DEG_PER_SEC_AT_OMEGA50 = 90.0 # 功率=50 时机器人实测自转角速度（°/s），待标定
 DEFAULT_AUTO_POWER = 50                # 平移功率默认值
 DEFAULT_OMEGA_POWER = 40               # 旋转功率默认值
 
@@ -70,6 +114,13 @@ ROTATION_DEADBAND_DEG = 3.0   # 模式 B 中 |Δθ|< 此值跳过旋转
 MERGE_ANGLE_DEG = 5.0          # 相邻段方向夹角小于此值则合并
 MERGE_MAX_DURATION = 4.0       # 合并后单步最长 4 秒（防止误合并）
 STOP_BUFFER = (0.1, 0, 0, 0)   # 自动序列末尾的停止缓冲
+
+# ===== 缓升缓降（速度斜坡）默认值 =====
+# 每个路段开头/结尾插入加速/减速子步骤，防止高功率起步打滑
+DEFAULT_RAMP_TIME = 0.25       # 每段加速 / 减速各占多少秒（总过渡 = RAMP_TIME × 2）
+DEFAULT_RAMP_STEPS = 5         # 加速 / 减速各切成多少个子步骤（越多越平滑）
+DEFAULT_RAMP_MIN_RATIO = 0.15  # 起始 / 结束功率比例（0.15 = 15%，克服静摩擦最低值）
+RAMP_ENABLED = True            # 是否启用缓升缓降（导出时生效）
 
 # ===== 数据结构版本 =====
 SCHEMA_VERSION = 4  # v4: + chassis profile id
@@ -98,19 +149,15 @@ class ChassisProfile:
     """
 
     def __init__(self, profile_id, display_name, file_name, wheel_count,
-                 has_face_concept=False, description=""):
-        # 唯一 ID：写入 JSON 用，不显示给用户。保持小写蛇形命名
+                 has_face_concept=False, description="", color="#2878D0"):
         self.profile_id = profile_id
-        # 在 GUI 下拉框里显示的名称
         self.display_name = display_name
-        # 机器人源文件名（相对 PROJECT_ROOT）
         self.file_name = file_name
-        # 轮子数量（仅用于显示统计信息）
         self.wheel_count = wheel_count
-        # 三轮全向有 3 个对称正面（按 R1/L1 切换）；麦克纳姆没有
         self.has_face_concept = has_face_concept
-        # 简要描述，显示在 GUI 提示区
         self.description = description
+        # 多车叠加视图中该车型的专属颜色（HTML 十六进制）
+        self.color = color
 
     @property
     def file_path(self):
@@ -124,40 +171,30 @@ class ChassisProfile:
 OMNI3_PROFILE = ChassisProfile(
     profile_id="omni3",
     display_name="三轮全向（120° 对称）",
-    file_name="mecanum_forward.py",  # 历史命名保留，不改避免破坏现有引用
+    file_name="mecanum_forward.py",
     wheel_count=3,
     has_face_concept=True,
+    color="#2878D0",   # 蓝色
     description=(
         "M1（前左 150°）+ M2（前右 30°）+ M3（尾部 270°）。"
         "通过 R1/L1 切换正面方向。"
     ),
 )
 
-MECANUM_X_PROFILE = ChassisProfile(
-    profile_id="mecanum_x",
-    display_name="X 型麦克纳姆（4 轮）",
-    file_name="mecanum_X_forward.py",
-    wheel_count=4,
-    has_face_concept=False,
-    description=(
-        "M1（前左）+ M2（前右）+ M3（后左）+ M4（后右），"
-        "滚轮 ±45° 形成 X 形。前后/左右对称，没有 face 概念。"
-    ),
-)
-
-MECANUM_DRIVE_PROFILE = ChassisProfile(
-    profile_id="mecanum_drive",
-    display_name="麦克纳姆竞赛车（含收球 / 滚球）",
+MECANUM_4W_PROFILE = ChassisProfile(
+    profile_id="mecanum_4w",
+    display_name="四轮麦克纳姆（含收球 / 滚球）",
     file_name="mecanum_drive.py",
     wheel_count=4,
     has_face_concept=False,
+    color="#2E7D32",   # 绿色
     description=(
-        "X 型麦克纳姆底盘 + M5 滚球电机 + DC1/DC2 收球电机。"
-        "运动学与 mecanum_x 相同；N1-N4 键用于执行机构，+ 键触发自动程序。"
+        "X 型麦克纳姆底盘（M1–M4）+ M5 滚球电机 + DC1/DC2 收球电机。"
+        "前后左右对称，没有 face 概念；N1-N4 键用于执行机构，+ 键触发自动程序。"
     ),
 )
 
-CHASSIS_PROFILES = [OMNI3_PROFILE, MECANUM_X_PROFILE, MECANUM_DRIVE_PROFILE]
+CHASSIS_PROFILES = [OMNI3_PROFILE, MECANUM_4W_PROFILE]
 
 # 默认选中第一个
 DEFAULT_PROFILE_ID = OMNI3_PROFILE.profile_id
