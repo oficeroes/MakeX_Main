@@ -223,18 +223,10 @@ def write_auto_sequence(sequence, robot_file=ROBOT_FILE, source_name="(manual)",
     if ramp_ms is not None:
         new_text = upsert_int_constant(new_text, "AUTO_RAMP_MS", ramp_ms)
 
-    # 闭环参数写回
+    # 闭环参数写回（v5 使用 novapi 内置 move()，只需 ENCODER_TICKS_PER_CM）
     if encoder_based:
-        from .config import (
-            ENCODER_TICKS_PER_CM, PID_KP, PID_KI, PID_KD,
-            PROFILE_ACCEL_TICKS, PROFILE_DEADBAND_TICKS,
-        )
+        from .config import ENCODER_TICKS_PER_CM
         new_text = upsert_float_constant(new_text, "ENCODER_TICKS_PER_CM", ENCODER_TICKS_PER_CM)
-        new_text = upsert_float_constant(new_text, "PID_KP", PID_KP)
-        new_text = upsert_float_constant(new_text, "PID_KI", PID_KI)
-        new_text = upsert_float_constant(new_text, "PID_KD", PID_KD)
-        new_text = upsert_int_constant(new_text, "PROFILE_ACCEL_TICKS", PROFILE_ACCEL_TICKS)
-        new_text = upsert_int_constant(new_text, "PROFILE_DEADBAND_TICKS", PROFILE_DEADBAND_TICKS)
 
     backup_path = robot_file.with_suffix(robot_file.suffix + ".bak")
     shutil.copy2(robot_file, backup_path)

@@ -10,6 +10,11 @@ v5 新增：编码器闭环模式（encoder_based=True）
   每段输出 ('enc_move', target_ticks, Vy_power, 0) 而非时间步。
   机器人用 PID 追踪编码器目标，从根源消除"一卡一卡"问题。
 
+v5.1 修复："一格一格走"问题
+  - 添加 merge_enc_sequence() 合并连续同向小段
+  - 添加 MIN_ENC_STEP_TICKS 最小步长阈值
+  - 合并策略：同向（Vy 同号）且功率偏差 ≤30% 的相邻步合并为一步
+
 曲率自适应速度
 ==============
   转弯处速度降至 90%，直线处提升至 105%。
@@ -47,6 +52,8 @@ from .config import (
     CURVATURE_THRESHOLD,
     BASE_SPEED_CM_PER_SEC,
     BASE_ROT_DEG_PER_SEC,
+    MIN_ENC_STEP_TICKS,
+    ENC_MERGE_POWER_RATIO,
 )
 
 
@@ -206,12 +213,14 @@ def build_encoder_sequence(points, base_power, base_speed_cm_s=BASE_SPEED_CM_PER
                            curve_adaptive=True):
     """纯平移 + 编码器闭环 + 基于距离的速度曲线。
 
-    按加速段→匀速段→减速段分配速度，每段合并为少量编码器步。
+    加速段→匀速段→减速段。加速/减速距离按路径总长自适应：
+      - 长路径：使用用户设定的 accel_cm / decel_cm
+      - 短路径：自动缩小，确保至少 30% 路径为匀速段
     """
     if len(points) < 2:
         return []
 
-    # 参数默认值
+    # 参数默认值（用户设定）
     if accel_cm is None:
         from .config import PROFILE_ACCEL_CM as accel_cm
     if decel_cm is None:
@@ -224,6 +233,12 @@ def build_encoder_sequence(points, base_power, base_speed_cm_s=BASE_SPEED_CM_PER
     total = _path_total_length(points)
     if total < 0.1:
         return [('enc_stop', 0, 0, 0)]
+
+    # ★ 自适应：确保加速+减速不超过路径的 70%，预留 ≥30% 匀速段
+    _MAX_ACCEL_RATIO = 0.35  # 加速最多占 35%
+    _MAX_DECEL_RATIO = 0.35  # 减速最多占 35%
+    accel_cm = min(accel_cm, total * _MAX_ACCEL_RATIO)
+    decel_cm = min(decel_cm, total * _MAX_DECEL_RATIO)
 
     power = _clamp_power(base_power)
     curv = compute_curvature(points) if curve_adaptive else [0.0] * len(points)
@@ -308,6 +323,12 @@ def build_encoder_sequence_heading(points, base_power, omega_power,
     if total < 0.1:
         return [('enc_stop', 0, 0, 0)]
 
+    # ★ 自适应：确保加速+减速不超过路径的 70%，预留 ≥30% 匀速段
+    _MAX_ACCEL_RATIO = 0.35
+    _MAX_DECEL_RATIO = 0.35
+    accel_cm = min(accel_cm, total * _MAX_ACCEL_RATIO)
+    decel_cm = min(decel_cm, total * _MAX_DECEL_RATIO)
+
     power = _clamp_power(base_power)
     seq = []
     heading_deg = 90.0
@@ -351,6 +372,132 @@ def build_encoder_sequence_heading(points, base_power, omega_power,
 
     seq.append(('enc_stop', 0, 0, 0))
     return seq
+
+
+# ================================================================
+#  编码器序列合并（v5.1 — 解决"一格一格走"问题）
+# ================================================================
+
+def merge_enc_sequence(seq, min_ticks=MIN_ENC_STEP_TICKS,
+                       power_ratio=ENC_MERGE_POWER_RATIO):
+    """合并连续同向的 enc_move / enc_rot 步，消除步间停顿。
+
+    策略
+    ====
+    1. 过滤掉 ticks < min_ticks 的过小步（累积到下一步）。
+    2. 合并连续的同类型同向步：
+       - enc_move 之间：Vy 同号 且 功率偏差 ≤ power_ratio
+       - enc_rot 之间：omega 同号 且 功率偏差 ≤ power_ratio
+    3. 合并时 ticks 累加，功率取 ticks 加权平均。
+    4. enc_stop / 非编码器步 作为分隔符，不跨类型合并。
+
+    参数
+    ====
+    seq         : [(tag, ticks, p1, p2), ...]
+    min_ticks   : 小于此值的步被合并/丢弃
+    power_ratio : 功率偏差容许比例（0.3 = ±30%）
+
+    返回合并后的序列
+    """
+    if len(seq) < 2:
+        return list(seq)
+
+    # 第一步：过滤过小的步，累积 ticks 到后续同向步
+    filtered = []
+    carry_ticks = 0
+    carry_power = 0
+    carry_tag = None
+
+    for step in seq:
+        tag = step[0] if isinstance(step[0], str) else None
+
+        if tag in ('enc_move', 'enc_rot'):
+            ticks = step[1]
+            power_val = step[2] if tag == 'enc_move' else step[3]
+
+            if carry_tag == tag and (carry_ticks > 0):
+                # 有累积的 ticks，加到当前步
+                total_ticks = carry_ticks + ticks
+                # 功率加权平均
+                merged_power = int(round(
+                    (carry_power * carry_ticks + power_val * ticks) / max(total_ticks, 1)
+                ))
+                if tag == 'enc_move':
+                    filtered.append(('enc_move', total_ticks, merged_power, 0))
+                else:
+                    filtered.append(('enc_rot', total_ticks, 0, merged_power))
+                carry_ticks = 0
+                carry_power = 0
+                carry_tag = None
+            elif ticks < min_ticks:
+                # 太小，累积起来
+                carry_ticks += ticks
+                carry_power = power_val
+                carry_tag = tag
+            else:
+                filtered.append(step)
+        else:
+            # 非编码器步：先把累积的 tick 追加（如果有的话）
+            if carry_tag and carry_ticks > 0:
+                if carry_tag == 'enc_move':
+                    filtered.append(('enc_move', carry_ticks, int(round(carry_power)), 0))
+                else:
+                    filtered.append(('enc_rot', carry_ticks, 0, int(round(carry_power))))
+                carry_ticks = 0
+                carry_power = 0
+                carry_tag = None
+            filtered.append(step)
+
+    # 末尾残余
+    if carry_tag and carry_ticks > 0:
+        if carry_tag == 'enc_move':
+            filtered.append(('enc_move', carry_ticks, int(round(carry_power)), 0))
+        else:
+            filtered.append(('enc_rot', carry_ticks, 0, int(round(carry_power))))
+
+    if len(filtered) < 2:
+        return filtered
+
+    # 第二步：合并连续同向同类型步
+    merged = [list(filtered[0])]
+    for step in filtered[1:]:
+        prev = merged[-1]
+        prev_tag = prev[0] if isinstance(prev[0], str) else None
+        cur_tag = step[0] if isinstance(step[0], str) else None
+
+        can_merge = False
+        if prev_tag == cur_tag and prev_tag in ('enc_move', 'enc_rot'):
+            if prev_tag == 'enc_move':
+                prev_power = prev[2]
+                cur_power = step[2]
+                # 同号（同方向）
+                same_sign = (prev_power >= 0 and cur_power >= 0) or (prev_power <= 0 and cur_power <= 0)
+                if same_sign and max(abs(prev_power), 1) > 0:
+                    ratio = abs(cur_power - prev_power) / max(abs(prev_power), abs(cur_power), 1)
+                    if ratio <= power_ratio:
+                        can_merge = True
+            else:  # enc_rot
+                prev_power = prev[3]
+                cur_power = step[3]
+                same_sign = (prev_power >= 0 and cur_power >= 0) or (prev_power <= 0 and cur_power <= 0)
+                if same_sign and max(abs(prev_power), 1) > 0:
+                    ratio = abs(cur_power - prev_power) / max(abs(prev_power), abs(cur_power), 1)
+                    if ratio <= power_ratio:
+                        can_merge = True
+
+        if can_merge:
+            # 合并：ticks 累加，功率加权平均
+            total_ticks = prev[1] + step[1]
+            if prev_tag == 'enc_move':
+                w_avg = int(round((prev[2] * prev[1] + step[2] * step[1]) / max(total_ticks, 1)))
+                merged[-1] = ['enc_move', total_ticks, w_avg, 0]
+            else:
+                w_avg = int(round((prev[3] * prev[1] + step[3] * step[1]) / max(total_ticks, 1)))
+                merged[-1] = ['enc_rot', total_ticks, 0, w_avg]
+        else:
+            merged.append(list(step))
+
+    return [tuple(s) for s in merged]
 
 
 # ================================================================

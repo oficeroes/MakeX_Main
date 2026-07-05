@@ -74,19 +74,24 @@ PROFILE_DEADBAND_TICKS = 8        # 到位死区（ticks），小于此值视为
 # ===== 速度曲线参数（用户可调） =====
 # 整个路径分为三段：加速段 → 匀速段 → 减速段
 # 加速段和减速段按"距离"定义（cm），而非时间，确保物理一致性
-PROFILE_ACCEL_CM = 25.0           # 路径开头多少 cm 用于加速（0=禁用）
-PROFILE_DECEL_CM = 25.0           # 路径结尾多少 cm 用于减速（0=禁用）
-PROFILE_MAX_SPEED = 40.0          # 匀速段最高速度（cm/s）
-PROFILE_MIN_SPEED = 10.0          # 加速起点 / 减速终点的最低速度（cm/s），克服静摩擦
-PROFILE_ROT_SPEED = 60.0          # 旋转最高角速度（°/s）
-PROFILE_ROT_ACCEL_DEG = 30.0      # 旋转加速段长度（度）
-PROFILE_ROT_DECEL_DEG = 30.0      # 旋转减速段长度（度）
-PROFILE_CURVE_ADAPTIVE = True     # 是否启用曲率自适应（弯减速 10%，直加速 5%）
+PROFILE_ACCEL_CM = 8.0            # 路径开头多少 cm 用于加速（0=禁用）
+PROFILE_DECEL_CM = 8.0            # 路径结尾多少 cm 用于减速（0=禁用）
+PROFILE_MAX_SPEED = 100.0         # 匀速段最高速度（cm/s）
+PROFILE_MIN_SPEED = 30.0          # 加速起点 / 减速终点的最低速度（cm/s），克服静摩擦
+PROFILE_ROT_SPEED = 150.0         # 旋转最高角速度（°/s）
+PROFILE_ROT_ACCEL_DEG = 15.0      # 旋转加速段长度（度）
+PROFILE_ROT_DECEL_DEG = 15.0      # 旋转减速段长度（度）
+PROFILE_CURVE_ADAPTIVE = False    # 是否启用曲率自适应（弯减速 10%，直加速 5%）
 
 # 曲率自适应倍率（内部使用）
-CURVE_SLOWDOWN_FACTOR = 0.90
-STRAIGHT_BOOST_FACTOR = 1.05
+CURVE_SLOWDOWN_FACTOR = 0.95
+STRAIGHT_BOOST_FACTOR = 1.15
 CURVATURE_THRESHOLD = 0.08
+
+# ===== 编码器序列合并参数（v5.1：解决"一格一格走"） =====
+MIN_ENC_STEP_TICKS = 15             # 最小步长（encoder ticks），小于此值的步被合并到相邻步
+ENC_MERGE_POWER_RATIO = 0.30        # 合并容许功率偏差（0.30 = ±30%，即功率在 70%~130% 之间可合并）
+
 # 向后兼容别名
 BASE_SPEED_CM_PER_SEC = PROFILE_MAX_SPEED
 BASE_ROT_DEG_PER_SEC = PROFILE_ROT_SPEED
@@ -94,12 +99,12 @@ BASE_ROT_DEG_PER_SEC = PROFILE_ROT_SPEED
 # ===== 速度标定默认值 =====
 DEFAULT_CM_PER_SEC_AT_P50 = 30.0      # 功率=50 时机器人实测沿轴速度（cm/s），待标定
 DEFAULT_DEG_PER_SEC_AT_OMEGA50 = 90.0 # 功率=50 时机器人实测自转角速度（°/s），待标定
-DEFAULT_AUTO_POWER = 50                # 平移功率默认值
-DEFAULT_OMEGA_POWER = 40               # 旋转功率默认值
+DEFAULT_AUTO_POWER = 85                # 平移功率默认值
+DEFAULT_OMEGA_POWER = 70               # 旋转功率默认值
 
 # 安全限制：低于 POWER_MIN 时机器人会因静摩擦不动；高于 POWER_MAX 时易过载
-POWER_MIN = 20
-POWER_MAX = 90
+POWER_MIN = 25
+POWER_MAX = 95
 
 # ===== 平滑参数默认值 =====
 DEFAULT_SMOOTH_ITER = 3       # Chaikin 迭代次数
@@ -149,7 +154,8 @@ class ChassisProfile:
     """
 
     def __init__(self, profile_id, display_name, file_name, wheel_count,
-                 has_face_concept=False, description="", color="#2878D0"):
+                 has_face_concept=False, description="", color="#2878D0",
+                 supports_oscillate=False):
         self.profile_id = profile_id
         self.display_name = display_name
         self.file_name = file_name
@@ -158,6 +164,8 @@ class ChassisProfile:
         self.description = description
         # 多车叠加视图中该车型的专属颜色（HTML 十六进制）
         self.color = color
+        # 四轮专用功能开关
+        self.supports_oscillate = supports_oscillate
 
     @property
     def file_path(self):
@@ -187,6 +195,7 @@ MECANUM_4W_PROFILE = ChassisProfile(
     file_name="mecanum_drive.py",
     wheel_count=4,
     has_face_concept=False,
+    supports_oscillate=True,
     color="#2E7D32",   # 绿色
     description=(
         "X 型麦克纳姆底盘（M1–M4）+ M5 滚球电机 + DC1/DC2 收球电机。"

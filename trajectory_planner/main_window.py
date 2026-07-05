@@ -91,6 +91,7 @@ from .config import (
 )
 from .field_view import FieldScene, FieldView
 from .kinematics import build_sequence, build_encoder_sequence, build_encoder_sequence_heading
+from .kinematics import _path_total_length, merge_enc_sequence
 from .file_io import build_payload, save_trajectory, load_trajectory, next_filename
 from .exporter import write_auto_sequence
 from .obstacle_item import ObstacleItem
@@ -120,6 +121,8 @@ class MainWindow(QtWidgets.QMainWindow):
         self._refresh_title()
         # 初始化场景当前绘制车型
         self._sync_active_vehicle()
+        # 初始化四轮专用功能按钮可见性
+        self._update_chassis_specific_buttons()
 
     # ---- 工具栏 ----
     def _build_toolbar(self):
@@ -144,6 +147,11 @@ class MainWindow(QtWidgets.QMainWindow):
         act_save.setShortcut("Ctrl+S")
         act_save.triggered.connect(self.on_save)
 
+        act_save_as = QtWidgets.QAction("另存为", self)
+        act_save_as.setShortcut("Ctrl+Shift+S")
+        act_save_as.triggered.connect(self.on_save_as)
+        self.addAction(act_save_as)
+
         tb.addSeparator()
 
         # 撤销 / 重做
@@ -154,8 +162,8 @@ class MainWindow(QtWidgets.QMainWindow):
         self._act_undo.triggered.connect(self.on_undo)
 
         self._act_redo = tb.addAction("↪ 重做")
-        self._act_redo.setToolTip("重做已撤销的操作 (Ctrl+Y)")
-        self._act_redo.setShortcut("Ctrl+Y")
+        self._act_redo.setToolTip("重做已撤销的操作 (Ctrl+Y / Ctrl+Shift+Z)")
+        self._act_redo.setShortcuts(["Ctrl+Y", "Ctrl+Shift+Z"])
         self._act_redo.setEnabled(False)
         self._act_redo.triggered.connect(self.on_redo)
 
@@ -184,12 +192,10 @@ class MainWindow(QtWidgets.QMainWindow):
         act_export.setToolTip("将轨迹转换为 AUTO_SEQUENCE 并写入机器人源文件 (Ctrl+E)")
         act_export.setShortcut("Ctrl+E")
         act_export.triggered.connect(self.on_export)
-        # 让导出按钮加粗显示
-        for child in tb.children():
-            if isinstance(child, QtWidgets.QToolButton) and child.defaultAction() == act_export:
-                f = child.font(); f.setBold(True); child.setFont(f)
-                child.setStyleSheet("QToolButton { color: #1a6b1a; font-weight: bold; }")
-                break
+        # 绿色实心按钮样式（见 style.py QToolButton#btnExport）
+        btn_export = tb.widgetForAction(act_export)
+        if btn_export is not None:
+            btn_export.setObjectName("btnExport")
 
         tb.addSeparator()
 
@@ -206,6 +212,22 @@ class MainWindow(QtWidgets.QMainWindow):
         act_clear_path = tb.addAction("✕ 清空轨迹")
         act_clear_path.setToolTip("清除当前画的轨迹（不影响障碍物）")
         act_clear_path.triggered.connect(self.on_clear_path)
+
+        # ---- 隐藏快捷键动作（主流绘图软件习惯） ----
+        def _hidden_action(text, shortcuts, slot):
+            act = QtWidgets.QAction(text, self)
+            act.setShortcuts(shortcuts if isinstance(shortcuts, list) else [shortcuts])
+            act.triggered.connect(slot)
+            self.addAction(act)
+            return act
+
+        _hidden_action("删除选中(退格)", "Backspace", self.on_delete_selected)
+        _hidden_action("全选", "Ctrl+A", self.on_select_all)
+        _hidden_action("取消选择", "Ctrl+Shift+A", self.scene.clearSelection)
+        _hidden_action("放大", ["Ctrl+=", "Ctrl++"], lambda: self.view.zoom_in())
+        _hidden_action("缩小", "Ctrl+-", lambda: self.view.zoom_out())
+        _hidden_action("适应窗口", ["Ctrl+0", "F"], lambda: self.view.zoom_fit())
+        _hidden_action("快捷键帮助", ["F1", "Ctrl+/"], self.on_show_shortcuts)
 
         # ---- 第二工具栏：多车叠加视图 ----
         tb2 = self.addToolBar("多车叠加")
@@ -314,14 +336,14 @@ class MainWindow(QtWidgets.QMainWindow):
 
         self.sp_accel_cm = QtWidgets.QDoubleSpinBox()
         self.sp_accel_cm.setRange(0, 200); self.sp_accel_cm.setDecimals(1); self.sp_accel_cm.setSuffix(" cm")
-        self.sp_accel_cm.setValue(PROFILE_ACCEL_CM); self.sp_accel_cm.setSingleStep(5)
-        self.sp_accel_cm.setToolTip("路径开头多少 cm 用于加速（0=禁用）")
+        self.sp_accel_cm.setValue(PROFILE_ACCEL_CM); self.sp_accel_cm.setSingleStep(1)
+        self.sp_accel_cm.setToolTip("路径开头多少 cm 用于加速（0=禁用）。上限自动限制为最短路径×35%")
         f_speed.addRow("加速距离:", self.sp_accel_cm)
 
         self.sp_decel_cm = QtWidgets.QDoubleSpinBox()
         self.sp_decel_cm.setRange(0, 200); self.sp_decel_cm.setDecimals(1); self.sp_decel_cm.setSuffix(" cm")
-        self.sp_decel_cm.setValue(PROFILE_DECEL_CM); self.sp_decel_cm.setSingleStep(5)
-        self.sp_decel_cm.setToolTip("路径结尾多少 cm 用于减速（0=禁用）")
+        self.sp_decel_cm.setValue(PROFILE_DECEL_CM); self.sp_decel_cm.setSingleStep(1)
+        self.sp_decel_cm.setToolTip("路径结尾多少 cm 用于减速（0=禁用）。上限自动限制为最短路径×35%")
         f_speed.addRow("减速距离:", self.sp_decel_cm)
 
         self.sp_max_speed = QtWidgets.QDoubleSpinBox()
@@ -569,12 +591,16 @@ class MainWindow(QtWidgets.QMainWindow):
         btn_add_dc = QtWidgets.QPushButton("🔌 直流")
         btn_add_dc.setToolTip("设置直流电机持续转动（选 DC1-DC3 + 功率）")
         btn_add_dc.clicked.connect(self.on_add_dc_motor_block)
+        self.btn_add_oscillate = QtWidgets.QPushButton("↔ 震荡")
+        self.btn_add_oscillate.setToolTip("左右来回震荡（仅四轮麦克纳姆底盘可用）")
+        self.btn_add_oscillate.clicked.connect(self.on_add_oscillate_block)
         btn_h.addWidget(btn_add_servo)
         btn_h.addWidget(btn_add_drive)
         btn_h.addWidget(btn_add_delay)
         btn_h.addWidget(btn_add_spin)
         btn_h.addWidget(btn_add_motor)
         btn_h.addWidget(btn_add_dc)
+        btn_h.addWidget(self.btn_add_oscillate)
         v_seq.addWidget(btn_row)
 
         # 序列树（路段为父节点，block 为子节点）
@@ -646,11 +672,14 @@ class MainWindow(QtWidgets.QMainWindow):
 
     def _build_statusbar(self):
         sb = self.statusBar()
-        self._lbl_status = QtWidgets.QLabel("就绪 — 在画布上按住左键画轨迹")
+        self._lbl_status = QtWidgets.QLabel("就绪 — 左键画轨迹 | 滚轮缩放 | 中键/空格拖拽平移 | F1 查看快捷键")
         sb.addWidget(self._lbl_status, 1)
-        # 右侧：鼠标坐标显示
+        # 右侧：快捷键提示 + 鼠标坐标显示
+        lbl_help = QtWidgets.QLabel("F1 快捷键")
+        lbl_help.setStyleSheet("color: #2878D0; padding-right: 12px;")
+        sb.addPermanentWidget(lbl_help)
         self._lbl_coord = QtWidgets.QLabel("X: --  Y: --")
-        self._lbl_coord.setStyleSheet("color: #666; padding-right: 8px; font-family: monospace;")
+        self._lbl_coord.setStyleSheet("color: #666; padding-right: 8px; font-family: Consolas, monospace;")
         sb.addPermanentWidget(self._lbl_coord)
 
     def _wire_signals(self):
@@ -718,6 +747,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self._lbl_status.setText("段 %d 绘制完成 — 原始 %d 点 / 平滑 %d 点" % (
             seg_idx + 1, n_raw, n_smooth))
         self._refresh_seq_tree()
+        self._update_accel_decel_limits()
 
     def _on_mouse_pos(self, x, y):
         self._lbl_coord.setText("X: %6.1f  Y: %6.1f cm" % (x, y))
@@ -767,6 +797,43 @@ class MainWindow(QtWidgets.QMainWindow):
         self.lbl_chassis_desc.setText(profile.description)
         self._refresh_hint_label()
         self._sync_active_vehicle()
+        self._update_chassis_specific_buttons()
+
+    def _update_chassis_specific_buttons(self):
+        """根据当前底盘 profile 显示/隐藏专用功能按钮"""
+        profile = self._current_profile()
+        self.btn_add_oscillate.setVisible(profile.supports_oscillate)
+
+    def _update_accel_decel_limits(self):
+        """根据已画路径中最短的一条，动态限制加速/减速距离的上限。
+
+        上限 = 最短路径长度 × 35%，确保加速+减速 ≤ 路径的 70%。
+        无路径时恢复默认上限 200 cm。
+        """
+        # 找最短路径
+        min_len = None
+        for seg in self.scene.path_segments:
+            pts = seg.smoothed_points or seg.raw_points
+            if len(pts) >= 2:
+                L = _path_total_length(pts)
+                if min_len is None or L < min_len:
+                    min_len = L
+
+        if min_len is None:
+            max_accel = 200.0
+            max_decel = 200.0
+        else:
+            max_accel = round(min_len * 0.35, 1)
+            max_decel = round(min_len * 0.35, 1)
+
+        self.sp_accel_cm.setMaximum(max_accel)
+        self.sp_decel_cm.setMaximum(max_decel)
+
+        # 当前值超过新上限时自动压下
+        if self.sp_accel_cm.value() > max_accel:
+            self.sp_accel_cm.setValue(max_accel)
+        if self.sp_decel_cm.value() > max_decel:
+            self.sp_decel_cm.setValue(max_decel)
 
     def _on_vehicle_visibility(self, vehicle_id, visible):
         """工具栏车型按钮切换 → 显隐该车型的所有路段"""
@@ -794,6 +861,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self._current_file = None
         self._refresh_title()
         self._refresh_seq_tree()
+        self._update_accel_decel_limits()
         self._lbl_status.setText("已新建")
 
     def on_save(self):
@@ -813,6 +881,80 @@ class MainWindow(QtWidgets.QMainWindow):
         self._current_file = saved
         self._refresh_title()
         self._lbl_status.setText("已保存: %s" % saved)
+
+    def on_save_as(self):
+        """另存为：让用户自选文件名（Ctrl+Shift+S）"""
+        if not self.scene.path_segments or not any(
+            len(s.raw_points) >= 2 for s in self.scene.path_segments
+        ):
+            QtWidgets.QMessageBox.information(self, "另存为", "还没有画轨迹，无法保存。")
+            return
+        TRAJECTORIES_DIR.mkdir(parents=True, exist_ok=True)
+        path, _ = QtWidgets.QFileDialog.getSaveFileName(
+            self, "另存为", str(TRAJECTORIES_DIR / "trajectory.json"),
+            "轨迹文件 (*.json)"
+        )
+        if not path:
+            return
+        payload = self._build_current_payload()
+        try:
+            saved = save_trajectory(payload, Path(path))
+        except Exception as e:
+            QtWidgets.QMessageBox.critical(self, "保存失败", str(e))
+            return
+        self._current_file = saved
+        self._refresh_title()
+        self._lbl_status.setText("已另存为: %s" % saved)
+
+    def on_select_all(self):
+        """Ctrl+A 全选画布上所有元素"""
+        self.scene.select_all()
+        n = len(self.scene.selectedItems())
+        self._lbl_status.setText("已全选 %d 个元素" % n)
+
+    def on_show_shortcuts(self):
+        """F1 / Ctrl+/ 弹出快捷键速查表"""
+        rows = [
+            ("文件", ""),
+            ("Ctrl+N", "新建"),
+            ("Ctrl+O", "导入轨迹 JSON"),
+            ("Ctrl+S", "保存"),
+            ("Ctrl+Shift+S", "另存为"),
+            ("Ctrl+E", "导出到机器人"),
+            ("编辑", ""),
+            ("Ctrl+Z", "撤销"),
+            ("Ctrl+Y / Ctrl+Shift+Z", "重做"),
+            ("Ctrl+A", "全选"),
+            ("Ctrl+Shift+A", "取消选择"),
+            ("Del / Backspace", "删除选中"),
+            ("Esc", "取消正在画的线 / 取消选择"),
+            ("视图", ""),
+            ("滚轮", "缩放（以鼠标为中心）"),
+            ("Ctrl+= / Ctrl+-", "放大 / 缩小"),
+            ("Ctrl+0 / F", "缩放适应窗口"),
+            ("中键拖拽", "平移画布"),
+            ("空格+左键拖拽", "平移画布（抓手）"),
+            ("画布", ""),
+            ("左键拖拽", "绘制轨迹"),
+            ("Shift+左键拖拽", "框选多个元素"),
+        ]
+        html = ["<table cellspacing='0' cellpadding='4' style='font-size:13px;'>"]
+        for key, desc in rows:
+            if not desc:
+                html.append(
+                    "<tr><td colspan='2' style='padding-top:10px;'>"
+                    "<b style='color:#2878D0;'>%s</b></td></tr>" % key)
+            else:
+                html.append(
+                    "<tr><td style='padding-right:18px;'><code>%s</code></td>"
+                    "<td style='color:#444;'>%s</td></tr>" % (key, desc))
+        html.append("</table>")
+        box = QtWidgets.QMessageBox(self)
+        box.setWindowTitle("快捷键速查")
+        box.setTextFormat(QtCore.Qt.RichText)
+        box.setText("".join(html))
+        box.setStandardButtons(QtWidgets.QMessageBox.Ok)
+        box.exec_()
 
     def on_open(self):
         TRAJECTORIES_DIR.mkdir(parents=True, exist_ok=True)
@@ -1041,6 +1183,7 @@ class MainWindow(QtWidgets.QMainWindow):
                         break
 
         self._refresh_seq_tree()
+        self._update_accel_decel_limits()
         self._lbl_status.setText("已删除选中项目")
 
     def on_clear_path(self):
@@ -1048,6 +1191,7 @@ class MainWindow(QtWidgets.QMainWindow):
             return
         self.scene.clear_path()
         self._refresh_seq_tree()
+        self._update_accel_decel_limits()
 
     def on_resmooth(self):
         self.scene.resmooth(self.sp_smooth.value(), self.sp_resample.value())
@@ -1095,6 +1239,9 @@ class MainWindow(QtWidgets.QMainWindow):
 
     def on_add_dc_motor_block(self):
         self._add_block(ActionBlockItem.TYPE_DC_MOTOR)
+
+    def on_add_oscillate_block(self):
+        self._add_block(ActionBlockItem.TYPE_OSCILLATE)
 
     def on_edit_block(self):
         item = self.seq_tree.currentItem()
@@ -1164,8 +1311,58 @@ class MainWindow(QtWidgets.QMainWindow):
                 block_item.setForeground(0, QtGui.QBrush(block.border_color()))
 
     # ---- 构建合并序列 ----
+    @staticmethod
+    def _strip_intermediate_stops(seq):
+        """清理序列中多余的 enc_stop，只保留末尾最后一个。
+
+        每条 build_encoder_sequence() 都会在末尾附加 enc_stop，
+        多段路径拼接后会出现：
+          [enc_move..., enc_stop, enc_move..., enc_stop, 动作..., enc_stop]
+
+        多余的 enc_stop 会打断线段间的无缝衔接。本函数：
+          - 删除所有非末尾的 enc_stop
+          - 保留最后一个 enc_stop（若存在）
+          - 若序列最后不是 enc_stop，返回原序列（调用方会补一个）
+        """
+        if not seq:
+            return seq
+
+        # 找到最后一个 enc_stop 的位置
+        last_stop_idx = None
+        for i in range(len(seq) - 1, -1, -1):
+            step = seq[i]
+            if isinstance(step[0], str) and step[0] == 'enc_stop':
+                last_stop_idx = i
+                break
+
+        if last_stop_idx is None:
+            return seq  # 没有 enc_stop，保持不变
+
+        # 重建序列：保留所有非 enc_stop 步骤 + 仅最后一个 enc_stop
+        cleaned = []
+        for i, step in enumerate(seq):
+            if isinstance(step[0], str) and step[0] == 'enc_stop':
+                if i == last_stop_idx:
+                    cleaned.append(step)
+                # 否则跳过（多余的中间 enc_stop）
+            else:
+                cleaned.append(step)
+
+        return cleaned
+
     def _build_combined_sequence(self):
-        """只把当前选中车型的路段 + 执行块合并为 AUTO_SEQUENCE（v5 编码器闭环）"""
+        """只把当前选中车型的路段 + 执行块合并为 AUTO_SEQUENCE（v5 编码器闭环）
+
+        v5.1：调用 merge_enc_sequence() 合并连续同向小步，消除"一格一格走"。
+
+        多段路径处理（v5.2）：
+          - 每条路径段在 build_encoder_sequence() 末尾自带 enc_stop，
+            如果多段连续（中间无动作块），多余的 enc_stop 会打断无缝衔接。
+          - 本方法在全局合并前先清理掉"非末尾"的 enc_stop，
+            只保留整个序列最后一个 enc_stop，确保多段路径平滑过渡。
+          - 动作块前的 enc_stop 同样会被移除：若动作块需要机器人静止
+            （如舵机），由动作块自身负责（如 servo 自带 wait）。
+        """
         seq = []
         auto_power = self.sp_auto_power.value()
         omega_power = self.sp_omega_power.value()
@@ -1206,9 +1403,22 @@ class MainWindow(QtWidgets.QMainWindow):
                         min_speed=min_spd, max_speed=max_spd,
                         curve_adaptive=curve_on,
                     )
+                # v5.1: 合并连续同向小步，消除步间停顿
+                seg_seq = merge_enc_sequence(seg_seq)
                 seq.extend(seg_seq)
             for block in self.scene.action_chains[i]:
                 seq.extend(block.to_sequence_steps(max_spd, auto_power))
+
+        # v5.2: 清理多余的 enc_stop — 只保留序列末尾的最后一个
+        #        中间多余的 enc_stop 会打断多段路径的无缝衔接
+        seq = self._strip_intermediate_stops(seq)
+
+        # v5.1: 全局再合并一次（跨路径段的连续同向步）
+        seq = merge_enc_sequence(seq)
+
+        # v5.2: 确保末尾至少有一个 enc_stop 作为安全停止
+        if seq and not (isinstance(seq[-1][0], str) and seq[-1][0] == 'enc_stop'):
+            seq.append(('enc_stop', 0, 0, 0))
 
         return seq
 
@@ -1320,6 +1530,7 @@ class MainWindow(QtWidgets.QMainWindow):
             self.scene.add_obstacle_item(ObstacleItem.from_dict(od))
 
         self._refresh_seq_tree()
+        self._update_accel_decel_limits()
 
     # ---- 杂项 ----
     def _refresh_title(self):

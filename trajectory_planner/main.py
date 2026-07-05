@@ -24,11 +24,22 @@ except ImportError:
     sys.exit(1)
 
 from .main_window import MainWindow
+from .style import APP_STYLESHEET
 
 
 def main():
+    # 高 DPI 支持（必须在 QApplication 创建前设置）
+    QtCore = None
+    try:
+        from PyQt5 import QtCore
+        QtWidgets.QApplication.setAttribute(QtCore.Qt.AA_EnableHighDpiScaling, True)
+        QtWidgets.QApplication.setAttribute(QtCore.Qt.AA_UseHighDpiPixmaps, True)
+    except Exception:
+        pass
+
     app = QtWidgets.QApplication(sys.argv)
     app.setStyle("Fusion")
+    app.setStyleSheet(APP_STYLESHEET)
 
     # 全局字体加大：用于 4K / 高 DPI 屏幕可读性
     font = app.font()
@@ -36,7 +47,7 @@ def main():
     app.setFont(font)
 
     win = MainWindow()
-    win.show()
+    win.showMaximized()   # 默认最大化启动
     sys.exit(app.exec_())
 
 

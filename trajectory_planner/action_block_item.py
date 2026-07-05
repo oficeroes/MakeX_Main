@@ -32,13 +32,15 @@ _COLORS = {
     "spin":     ("#6A1B9A", "#F3E5F5"),
     "motor":    ("#C62828", "#FFEBEE"),
     "dc_motor": ("#00838F", "#E0F7FA"),
+    "oscillate": ("#BF360C", "#FBE9E7"),
 }
-_ICON = {"drive": ">>", "servo": "SV", "delay": "T", "spin": "⟳", "motor": "M", "dc_motor": "DC"}
+_ICON = {"drive": ">>", "servo": "SV", "delay": "T", "spin": "⟳", "motor": "M", "dc_motor": "DC", "oscillate": "↔"}
 
 
 def _type_name(block_type):
     return {"drive": "行走", "servo": "舵机", "delay": "延时", "spin": "自旋",
-            "motor": "编码电机", "dc_motor": "直流电机"}.get(block_type, block_type)
+            "motor": "编码电机", "dc_motor": "直流电机",
+            "oscillate": "震荡"}.get(block_type, block_type)
 
 
 def _default_params(block_type):
@@ -54,6 +56,9 @@ def _default_params(block_type):
         return {"motor_id": "M1", "power": 50}
     if block_type == "dc_motor":
         return {"dc_port": "DC1", "power": 100}
+    if block_type == "oscillate":
+        return {"angle_deg": 45.0, "cycles": 3, "speed_power": 50,
+                "strafe_cm": 0.0, "strafe_power": 40, "drift_vy": 0}
     return {}
 
 
@@ -67,6 +72,7 @@ class ActionBlockItem(QtWidgets.QGraphicsObject):
     TYPE_SPIN  = "spin"
     TYPE_MOTOR = "motor"
     TYPE_DC_MOTOR = "dc_motor"
+    TYPE_OSCILLATE = "oscillate"
 
     block_changed = QtCore.pyqtSignal()
 
@@ -190,6 +196,16 @@ class ActionBlockItem(QtWidgets.QGraphicsObject):
             return "%s @%d%%" % (p.get("motor_id", "M1"), p.get("power", 50))
         if self.block_type == "dc_motor":
             return "%s @%d%%" % (p.get("dc_port", "DC1"), p.get("power", 100))
+        if self.block_type == "oscillate":
+            s = "±%.0f° ×%d @P%d" % (
+                p.get("angle_deg", 45), p.get("cycles", 3), p.get("speed_power", 50))
+            sc = p.get("strafe_cm", 0.0)
+            if sc > 0.5:
+                s += " ←%.0fcm" % sc
+                dv = p.get("drift_vy", 0)
+                if dv != 0:
+                    s += " Vy%+d" % dv
+            return s
         return "?"
 
     def type_label(self):
@@ -244,7 +260,117 @@ class ActionBlockItem(QtWidgets.QGraphicsObject):
             return [("dc_motor",
                      str(p.get("dc_port", "DC1")),
                      int(p.get("power", 100)))]
+        if self.block_type == "oscillate":
+            return self._build_oscillate_sequence(p)
         return []
+
+    def _build_oscillate_sequence(self, p):
+        """构建震荡序列。
+
+        strafe_cm == 0（纯旋转）：使用 enc_rot 编码器闭环自旋扫掠。
+        strafe_cm > 0（旋转+左平移）：使用时间步 (dur, Vx, Vy, omega) 组合运动。
+        drift_vy：左移时的前向补偿功率，抵消机械后溜（正=前推）。
+        """
+        angle_deg = float(p.get("angle_deg", 45.0))
+        cycles = int(p.get("cycles", 3))
+        power = int(p.get("speed_power", 50))
+        strafe_cm = float(p.get("strafe_cm", 0.0))
+        strafe_power = int(p.get("strafe_power", 40))
+        drift_vy = int(p.get("drift_vy", 0))
+
+        if angle_deg < 1.0 or cycles < 1:
+            return []
+
+        if strafe_cm < 0.5:
+            return self._build_pure_oscillate(angle_deg, cycles, power)
+        else:
+            return self._build_strafe_oscillate(angle_deg, cycles, power,
+                                                 strafe_cm, strafe_power, drift_vy)
+
+    def _build_pure_oscillate(self, angle_deg, cycles, power):
+        """纯旋转震荡：enc_rot 编码器闭环 + 自动收球"""
+        from .config import ENCODER_TICKS_PER_CM
+        ticks_per_cm = ENCODER_TICKS_PER_CM
+
+        tick_half = int(round(abs(angle_deg) * ticks_per_cm * 0.5))
+        tick_full = tick_half * 2
+        if tick_half < 1:
+            return []
+
+        seq = []
+        # 震荡开始 → 自动开启收球电机
+        seq.append(("dc_motor", "DC1", -100))
+        seq.append(("dc_motor", "DC2", -100))
+
+        seq.append(("enc_rot", -tick_half, 0, power))
+        for i in range(cycles):
+            if i % 2 == 0:
+                seq.append(("enc_rot", +tick_full, 0, power))
+            else:
+                seq.append(("enc_rot", -tick_full, 0, power))
+        last_dir = -1 if cycles % 2 == 1 else 1
+        seq.append(("enc_rot", last_dir * tick_half, 0, power))
+        seq.append(("enc_stop", 0, 0, 0))
+
+        # 震荡结束 → 关闭收球电机
+        seq.append(("dc_motor", "DC1", 0))
+        seq.append(("dc_motor", "DC2", 0))
+        return seq
+
+    def _build_strafe_oscillate(self, angle_deg, cycles, power,
+                                 strafe_cm, strafe_power, drift_vy=0):
+        """旋转震荡 + 左平移：时间步 (dur, Vx, Vy, omega)
+
+        drift_vy: 前向补偿功率（正=前推），抵消左移时的机械后溜。
+        """
+        from .config import (DEFAULT_DEG_PER_SEC_AT_OMEGA50,
+                             DEFAULT_CM_PER_SEC_AT_P50, STOP_BUFFER)
+
+        # 旋转速度估算：power=50 时 90°/s，线性外推
+        rot_deg_per_s = power * DEFAULT_DEG_PER_SEC_AT_OMEGA50 / 50.0
+        rot_deg_per_s = max(rot_deg_per_s, 1.0)
+
+        # 半程时间（转 angle_deg° 的耗时）
+        t_half = angle_deg / rot_deg_per_s
+        # 全程时间（转 2×angle_deg°，穿过中点）
+        t_full = t_half * 2.0
+
+        # 总旋转量 = 首半程 + cycles×2全程 + 尾半程 = 2×angle×(cycles+1)
+        total_rot_deg = 2.0 * angle_deg * (cycles + 1)
+        total_time = total_rot_deg / rot_deg_per_s
+
+        # 平移速度：需要在 total_time 内走完 strafe_cm
+        strafe_speed_cm_s = strafe_cm / max(total_time, 0.01)
+        # 平移功率：power=50 时 30cm/s，线性外推
+        cm_per_s_per_power = DEFAULT_CM_PER_SEC_AT_P50 / 50.0
+        vx_power = int(round(strafe_speed_cm_s / max(cm_per_s_per_power, 0.01)))
+        vx_power = max(25, min(95, vx_power))  # 左移，Vx 负
+
+        # 如果 strafe_power 不足以达到所需速度，用 strafe_power 作为上限
+        vx_power = -min(abs(vx_power), abs(strafe_power))
+
+        seq = []
+        # 震荡开始 → 自动开启收球电机
+        seq.append(("dc_motor", "DC1", -100))
+        seq.append(("dc_motor", "DC2", -100))
+
+        # 第1步：初始半程左转 + 左移 + 前向补偿
+        seq.append((round(t_half, 2), vx_power, drift_vy, -power))
+        # 中间 cycles 步：全程扫过中点（交替右/左转）
+        for i in range(cycles):
+            if i % 2 == 0:
+                seq.append((round(t_full, 2), vx_power, drift_vy, +power))
+            else:
+                seq.append((round(t_full, 2), vx_power, drift_vy, -power))
+        # 最后一步：归中
+        last_omega = -power if cycles % 2 == 1 else power
+        seq.append((round(t_half, 2), vx_power, drift_vy, last_omega))
+        seq.append(STOP_BUFFER)
+
+        # 震荡结束 → 关闭收球电机
+        seq.append(("dc_motor", "DC1", 0))
+        seq.append(("dc_motor", "DC2", 0))
+        return seq
 
     def to_dict(self):
         return {
@@ -369,6 +495,50 @@ class ActionBlockEditor(QtWidgets.QDialog):
             layout.addRow("电机功率:", dpw)
             self._widgets["power"] = dpw
 
+        elif block_type == "oscillate":
+            amp = QtWidgets.QDoubleSpinBox()
+            amp.setRange(5, 3600); amp.setDecimals(0); amp.setSuffix(" °")
+            amp.setValue(float(params.get("angle_deg", 45.0)))
+            amp.setToolTip("单侧最大转角。震荡时小车从 0°→左 angle°→右 angle°→左… 穿过中点来回扫掠")
+            layout.addRow("旋转角度:", amp)
+            self._widgets["angle_deg"] = amp
+
+            cyc = QtWidgets.QSpinBox()
+            cyc.setRange(1, 100); cyc.setSuffix(" 次")
+            cyc.setValue(int(params.get("cycles", 3)))
+            cyc.setToolTip("完整来回次数（1次=左→右→左 扫过一个完整周期）")
+            layout.addRow("震荡次数:", cyc)
+            self._widgets["cycles"] = cyc
+
+            spd = QtWidgets.QSpinBox()
+            spd.setRange(20, 100); spd.setSuffix(" %")
+            spd.setValue(int(params.get("speed_power", 50)))
+            spd.setToolTip("自旋时的 omega 功率（%）。越高转得越快")
+            layout.addRow("旋转功率:", spd)
+            self._widgets["speed_power"] = spd
+
+            # ── 左平移（边震荡边向左移动）──
+            sc = QtWidgets.QDoubleSpinBox()
+            sc.setRange(0, 500); sc.setDecimals(1); sc.setSuffix(" cm")
+            sc.setValue(float(params.get("strafe_cm", 0.0)))
+            sc.setToolTip("震荡同时向左平移的距离。0=纯旋转震荡，>0=边转边向左移")
+            layout.addRow("左移距离:", sc)
+            self._widgets["strafe_cm"] = sc
+
+            sp = QtWidgets.QSpinBox()
+            sp.setRange(20, 100); sp.setSuffix(" %")
+            sp.setValue(int(params.get("strafe_power", 40)))
+            sp.setToolTip("左平移时的 Vx 功率上限（%）。实际功率=匀速所需功率，不超过此值")
+            layout.addRow("左移功率:", sp)
+            self._widgets["strafe_power"] = sp
+
+            dv = QtWidgets.QSpinBox()
+            dv.setRange(-30, 30); dv.setSuffix(" %")
+            dv.setValue(int(params.get("drift_vy", 0)))
+            dv.setToolTip("左移漂移补偿（Vy 前向功率）。左移时小车会后溜偏左下 → 填正数前推抵消")
+            layout.addRow("漂移补偿 Vy:", dv)
+            self._widgets["drift_vy"] = dv
+
         btns = QtWidgets.QDialogButtonBox(
             QtWidgets.QDialogButtonBox.Ok | QtWidgets.QDialogButtonBox.Cancel)
         btns.accepted.connect(self.accept)
@@ -395,4 +565,11 @@ class ActionBlockEditor(QtWidgets.QDialog):
         elif self.block_type == "dc_motor":
             p["dc_port"] = self._widgets["dc_port_combo"].currentText()
             p["power"] = self._widgets["power"].value()
+        elif self.block_type == "oscillate":
+            p["angle_deg"] = self._widgets["angle_deg"].value()
+            p["cycles"] = self._widgets["cycles"].value()
+            p["speed_power"] = self._widgets["speed_power"].value()
+            p["strafe_cm"] = self._widgets["strafe_cm"].value()
+            p["strafe_power"] = self._widgets["strafe_power"].value()
+            p["drift_vy"] = self._widgets["drift_vy"].value()
         return p

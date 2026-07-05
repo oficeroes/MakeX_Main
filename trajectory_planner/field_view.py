@@ -288,6 +288,32 @@ class FieldScene(QtWidgets.QGraphicsScene):
         self._drawing_seg = -1
         self._refresh_collision()
 
+    def cancel_path(self):
+        """取消正在绘制的路段（Esc）。返回 True 表示确实取消了一段。"""
+        if not self._drawing or self._drawing_seg < 0:
+            return False
+        idx = self._drawing_seg
+        self._drawing = False
+        self._drawing_seg = -1
+        if 0 <= idx < len(self.path_segments):
+            self.removeItem(self.path_segments[idx])
+            del self.path_segments[idx]
+            del self.action_chains[idx]
+            del self.segment_vehicle_ids[idx]
+        return True
+
+    def select_all(self):
+        """全选：所有路段 + 障碍物 + 执行块（Ctrl+A）"""
+        for seg in self.path_segments:
+            if seg.isVisible():
+                seg.setSelected(True)
+        for obs in self.obstacles():
+            obs.setSelected(True)
+        for chain in self.action_chains:
+            for block in chain:
+                if block.isVisible():
+                    block.setSelected(True)
+
     # ---- 车型显隐 ----
     def set_vehicle_visible(self, vehicle_id, visible):
         """显示或隐藏某个车型的所有路段及其执行块"""
@@ -469,7 +495,20 @@ def _cluster_points(pts, eps):
 
 
 class FieldView(QtWidgets.QGraphicsView):
-    """视图：自动保持场地纵横比；左键绘制轨迹（除非按到障碍物/手柄/执行块）"""
+    """视图：自动保持场地纵横比；左键绘制轨迹（除非按到障碍物/手柄/执行块）
+
+    绘图软件式交互
+    ==============
+      Ctrl + 滚轮 / 滚轮  缩放（以鼠标为中心）
+      中键拖拽 / 空格+左键拖拽  平移画布
+      Ctrl+0   缩放适应窗口
+      Ctrl+= / Ctrl+-  放大 / 缩小
+      Esc      取消正在绘制的路段
+    """
+
+    ZOOM_STEP = 1.15
+    ZOOM_MIN = 0.5    # 相对 fit 的倍率
+    ZOOM_MAX = 12.0
 
     def __init__(self, scene, parent=None):
         super().__init__(scene, parent)
@@ -477,25 +516,124 @@ class FieldView(QtWidgets.QGraphicsView):
         self.setRenderHint(QtGui.QPainter.SmoothPixmapTransform)
         self.scale(1, -1)
         self.setMouseTracking(True)
-        self.setBackgroundBrush(QtGui.QBrush(QtGui.QColor(60, 60, 65)))
+        self.setBackgroundBrush(QtGui.QBrush(QtGui.QColor(38, 41, 48)))
         self.setDragMode(QtWidgets.QGraphicsView.NoDrag)
-        self.setTransformationAnchor(QtWidgets.QGraphicsView.AnchorViewCenter)
+        self.setTransformationAnchor(QtWidgets.QGraphicsView.AnchorUnderMouse)
         self.setResizeAnchor(QtWidgets.QGraphicsView.AnchorViewCenter)
         self.setHorizontalScrollBarPolicy(QtCore.Qt.ScrollBarAlwaysOff)
         self.setVerticalScrollBarPolicy(QtCore.Qt.ScrollBarAlwaysOff)
         # 全视口更新：消除 ItemIsMovable 拖拽时的边框鬼影
         self.setViewportUpdateMode(QtWidgets.QGraphicsView.FullViewportUpdate)
 
+        self._zoom = 1.0            # 相对 fit 的缩放倍率
+        self._user_zoomed = False   # 用户手动缩放后不再自动 fit
+        self._panning = False       # 中键 / 空格拖拽平移中
+        self._pan_start = QtCore.QPoint()
+        self._space_held = False
+
+    # ---- 缩放 ----
+    def zoom_fit(self):
+        """缩放至场地充满窗口（Ctrl+0）"""
+        self._zoom = 1.0
+        self._user_zoomed = False
+        self.fitInView(self.scene().sceneRect(), QtCore.Qt.KeepAspectRatio)
+
+    def zoom_by(self, factor, anchor_under_mouse=True):
+        new_zoom = self._zoom * factor
+        if new_zoom < self.ZOOM_MIN or new_zoom > self.ZOOM_MAX:
+            return
+        self._zoom = new_zoom
+        self._user_zoomed = True
+        if anchor_under_mouse:
+            self.setTransformationAnchor(QtWidgets.QGraphicsView.AnchorUnderMouse)
+        else:
+            self.setTransformationAnchor(QtWidgets.QGraphicsView.AnchorViewCenter)
+        self.scale(factor, factor)
+
+    def zoom_in(self):
+        self.zoom_by(self.ZOOM_STEP, anchor_under_mouse=False)
+
+    def zoom_out(self):
+        self.zoom_by(1.0 / self.ZOOM_STEP, anchor_under_mouse=False)
+
+    def current_zoom(self):
+        return self._zoom
+
+    def wheelEvent(self, event):
+        # 滚轮缩放（主流绘图软件行为；Ctrl 可按可不按）
+        delta = event.angleDelta().y()
+        if delta == 0:
+            return
+        factor = self.ZOOM_STEP if delta > 0 else 1.0 / self.ZOOM_STEP
+        self.zoom_by(factor, anchor_under_mouse=True)
+        event.accept()
+
+    # ---- 平移 ----
+    def _begin_pan(self, global_pos):
+        self._panning = True
+        self._pan_start = global_pos
+        self.viewport().setCursor(QtCore.Qt.ClosedHandCursor)
+
+    def _do_pan(self, global_pos):
+        delta = global_pos - self._pan_start
+        self._pan_start = global_pos
+        h = self.horizontalScrollBar()
+        v = self.verticalScrollBar()
+        h.setValue(h.value() - delta.x())
+        v.setValue(v.value() - delta.y())
+
+    def _end_pan(self):
+        self._panning = False
+        self.viewport().setCursor(
+            QtCore.Qt.OpenHandCursor if self._space_held else QtCore.Qt.ArrowCursor)
+
+    def keyPressEvent(self, event):
+        if event.key() == QtCore.Qt.Key_Space and not event.isAutoRepeat():
+            self._space_held = True
+            if not self._panning:
+                self.viewport().setCursor(QtCore.Qt.OpenHandCursor)
+            event.accept()
+            return
+        if event.key() == QtCore.Qt.Key_Escape:
+            if self.scene().cancel_path():
+                event.accept()
+                return
+            self.scene().clearSelection()
+            event.accept()
+            return
+        super().keyPressEvent(event)
+
+    def keyReleaseEvent(self, event):
+        if event.key() == QtCore.Qt.Key_Space and not event.isAutoRepeat():
+            self._space_held = False
+            if not self._panning:
+                self.viewport().setCursor(QtCore.Qt.ArrowCursor)
+            event.accept()
+            return
+        super().keyReleaseEvent(event)
+
     def resizeEvent(self, event):
         super().resizeEvent(event)
-        self.fitInView(self.scene().sceneRect(), QtCore.Qt.KeepAspectRatio)
+        if not self._user_zoomed:
+            self.fitInView(self.scene().sceneRect(), QtCore.Qt.KeepAspectRatio)
 
     def showEvent(self, event):
         super().showEvent(event)
-        self.fitInView(self.scene().sceneRect(), QtCore.Qt.KeepAspectRatio)
+        if not self._user_zoomed:
+            self.fitInView(self.scene().sceneRect(), QtCore.Qt.KeepAspectRatio)
 
     def mousePressEvent(self, event):
+        # 中键拖拽平移
+        if event.button() == QtCore.Qt.MiddleButton:
+            self._begin_pan(event.globalPos())
+            event.accept()
+            return
         if event.button() == QtCore.Qt.LeftButton:
+            # 空格 + 左键 → 平移（Photoshop 式抓手）
+            if self._space_held:
+                self._begin_pan(event.globalPos())
+                event.accept()
+                return
             # Shift + 拖拽 → 橡皮筋框选
             if event.modifiers() & QtCore.Qt.ShiftModifier:
                 self.setDragMode(QtWidgets.QGraphicsView.RubberBandDrag)
@@ -514,6 +652,10 @@ class FieldView(QtWidgets.QGraphicsView):
         super().mousePressEvent(event)
 
     def mouseMoveEvent(self, event):
+        if self._panning:
+            self._do_pan(event.globalPos())
+            event.accept()
+            return
         scene_pos = self.mapToScene(event.pos())
         self.scene().mouse_pos_cm.emit(scene_pos.x(), scene_pos.y())
         # 橡皮筋框选进行中 → Qt 接管
@@ -527,6 +669,11 @@ class FieldView(QtWidgets.QGraphicsView):
         super().mouseMoveEvent(event)
 
     def mouseReleaseEvent(self, event):
+        if self._panning and event.button() in (
+                QtCore.Qt.MiddleButton, QtCore.Qt.LeftButton):
+            self._end_pan()
+            event.accept()
+            return
         if event.button() == QtCore.Qt.LeftButton:
             # 橡皮筋框选结束 → 重置为 NoDrag
             if self.dragMode() == QtWidgets.QGraphicsView.RubberBandDrag:
