@@ -16,8 +16,9 @@
     "deg_per_second_at_omega_50": 90.0,
     "auto_power": 50,
     "omega_power": 40,
-    "drift_left_omega": 0,
-    "drift_right_omega": 0
+    "front_back_compensation": 0.0,
+    "rotation_balance": 0.0,
+    "strafe_vy_coupling": 0.0
   },
   "settings": {
     "mode": "translation",

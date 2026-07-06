@@ -1,50 +1,70 @@
 """
-三轮全向机器人 — 遥控操控程序
-================================
+三轮全向机器人 — 遥控操控程序 (v2.0 面映射版)
+================================================
 描述：基于 Novapi 平台的三轮全向底盘遥控程序。
       左摇杆控制全向移动（前进/后退/左右横移），
       右摇杆左右控制原地自旋，
       两个摇杆可同时操作实现复合运动（如边前进边转圈）。
+      🆕 L1 换面后功能键自动重映射为当前面搭载设备的功能。
 
 硬件需求：
   - 编码电机 ×5：M1（前左轮）、M2（前右轮）、M3（尾部轮）、M4（一号臂升降）、M5（二号臂升降）
   - 直流电机 ×1：DC1（收球履带）
+  - 无刷电机 ×2：BL1 + BL2（发射小球，动力扩展板）
   - 智能舵机 ×2：M6-INDEX1（一号臂夹取）、M6-INDEX2（二号臂夹取）
   - 8×16 LED 点阵屏 ×1：PORT2-INDEX1
 
-操控速查（正常模式）：
-  ┌──────────────┬──────────────────────────────────┐
-  │   你想做的    │            手柄操作               │
-  ├──────────────┼──────────────────────────────────┤
-  │  前进/后退   │  左摇杆 ↑↓                       │
-  │  左右横移    │  左摇杆 ←→                       │
-  │  原地自旋    │  右摇杆 ←→                       │
-  │  顺时针换面  │  按 L1（车身旋转120°+逻辑换面）   │
-  │  升降臂档位  │  D-pad ↑↓（L0/L1/L2）            │
-  │  升降臂回零  │  按 N3                            │
-  │  M4收球      │  按 N2（+100转 / 停，切换式）     │
-  │  DC1收球     │  按 N1（开/关切换）               │
-  │  自适应夹爪  │  按 R2（夹/再按放，二号臂）       │
-  │  自动程序    │  按 +（加号键）                   │
-  │  调试模式    │  按 ≡（菜单键切换）               │
-  └──────────────┴──────────────────────────────────┘
+操控速查（v2.0 — 面映射版）：
+  ┌─────────────────┬──────────────────────────────────────────────┐
+  │    你想做的      │                 手柄操作                      │
+  ├─────────────────┼──────────────────────────────────────────────┤
+  │  前进/后退      │  左摇杆 ↑↓                                   │
+  │  左右横移       │  左摇杆 ←→                                   │
+  │  原地自旋       │  右摇杆 ←→                                   │
+  │  顺时针换面     │  按 L1（车身旋转120°+功能键重映射）           │
+  ├─────────────────┼──────────┬──────────┬────────────────────────┤
+  │  按键 \\ 当前面  │  Face 0  │  Face 1  │  Face 2               │
+  │                 │  (收球面) │ (二号臂) │  (一号臂)              │
+  ├─────────────────┼──────────┼──────────┼────────────────────────┤
+  │  D-pad ↑↓       │ BL调速±5 │ M5升降档 │ M4升降档               │
+  │  D-pad ←→       │   闲置   │   闲置   │   闲置                 │
+  │  键A (N2)       │ DC1收球  │ M5升降档 │ M4升降档               │
+  │  键B (R2)       │ BL发射   │ SV2夹取  │ SV1夹取                │
+  │  N3             │   闲置   │ M5回零   │ M4回零                 │
+  ├─────────────────┼──────────┼──────────┼────────────────────────┤
+  │  自动程序       │  按 +（加号键）                              │
+  │  调试模式       │  按 ≡（菜单键切换）                          │
+  └─────────────────┴──────────────────────────────────────────────┘
+
+🆕 v2.0 更新：
+  - L1 换面后 D-pad↑↓、键A(N2)、键B(R2)、N3 自动重映射
+  - BL 无刷电机：换面时强制停止（安全），D-pad↑↓ 调速（Face 0 专用）
+  - DC1 收球：键A(N2) 切换，换面保持状态不中断
+  - M4/M5 双升降臂：各自独立 PID，换面不中断对方运动
+  - SV1/SV2 双夹爪：键B(R2) 触发，各自独立自适应夹取
 
 L1 换面说明：
   机器人有三个面（三角形三条边），默认 M1-M2 边为正面。
   按 L1 → 顺时针切换一个面（0→1→2→0），同时车身 PID 闭环旋转 120°。
+  换面时：DC1 保持当前状态 ✅ | BL1/BL2 强制停止 🚨 | M4/M5 PID 各自继续
 
 升降臂说明：
-  D-pad ↑↓ 在正常模式下切换升降档位 L0(底部)/L1(330°)/L2(660°)。
-  升降使用 M5（二号臂）编码电机 + PID 闭环 + 到位停电。
-  N3 一键回零档 L0。
+  一号臂：M4（升降）+ M6-INDEX1（夹取）— PID 控制 ✅
+  二号臂：M5（升降）+ M6-INDEX2（夹取）— PID 控制 ✅
+  两个臂完全独立，换面不中断对方正在进行的 PID 运动。
 
-自适应夹爪说明（R2 键）：
-  按 R2 → 二号舵机缓慢夹紧 → 速度归零（堵转）= 夹到 → 自动停电保持。
-  再按 R2 → 释放回全开位 0°。角度硬限位 280° 保护机械结构。
+自适应夹爪说明（键B=R2，面映射）：
+  Face 1 → SV2（二号臂）夹取 | Face 2 → SV1（一号臂）夹取
+  按一下→缓慢夹紧 → 速度归零堵转=夹到 → 自动停电保持。
+  再按→释放回全开位 0°。角度硬限位 300° 保护机械结构。
+
+无刷电机说明：
+  Face 0 → 键B(R2) 切换 BL1+BL2 发射，D-pad↑↓ 调速（10~100）。
+  换面离开 Face 0 → BL 强制停止。
 
 舵机铁律：
   🚨 servo_dir = -1 写死（负=夹紧，正=撑爆）
-  🚨 夹紧幅度 ≤ 280°（机械极限）
+  🚨 夹紧幅度 ≤ 300°（机械极限）
   🚨 机器人无终端输出，LED 点阵屏是唯一用户界面
 
 自动程序说明：
@@ -97,7 +117,11 @@ AUTO_STEP_DELAY = 0.02     # 自动程序步骤循环周期（秒）
 
 # 收球直流电机配置
 DC_COLLECTOR_PORT = "DC1"  # 动力扩展板通道（1号口）
-DC_COLLECTOR_SPEED = 100   # 收球最大速度（正转收球）
+DC_COLLECTOR_SPEED = -100  # 收球最大速度（负转收球，已翻转方向）
+
+# 无刷电机配置（发射小球用，动力扩展板 BL1/BL2 通道）
+BL_ACTION_SPEED = 80        # 无刷电机发射速度（10~100，R1 开关 / D-pad ←→ 调速）
+BL_SPINUP_DELAY = 0.1       # 无刷电机启动延迟（秒）
 
 # 8x16 LED 点阵屏配置（横屏：16列 × 8行）
 LED_PORT = "PORT2"          # 点阵屏连接的 PORT 口（PORT1~PORT4）
@@ -105,9 +129,10 @@ LED_INDEX = "INDEX1"        # 端口链上的序号
 
 # 调试模式配置
 DEBUG_TEST_SPEED = 50        # 调试模式中电机测试速度
-DEBUG_MOTOR_TYPES = ["编码电机", "直流电机", "升降臂", "舵机"]       # 电机类型名称
+DEBUG_MOTOR_TYPES = ["编码电机", "直流电机", "升降臂", "舵机", "无刷电机"]
 DEBUG_MOTOR_NAMES = ["M1", "M2", "M3", "M4"]       # 电机编号名称
 DEBUG_DC_NAMES = ["DC1"]                           # 直流电机编号
+DEBUG_BLDC_NAMES = ["BL1", "BL2", "BL12"]            # 无刷电机编号（BL12=双电机同时）
 # 升降臂调试档位（编码器角度，1号臂M4和2号臂M5通用）
 DEBUG_LIFT_GEARS = [0, 330, 660]     # 实测档位：L0=底部, L1=330°, L2=660°
 DEBUG_LIFT_NAMES = ["L0", "L1", "L2"]
@@ -122,13 +147,22 @@ DEBUG_SERVO_NAMES = ["SV1", "SV2"]                # 舵机编号
 DEBUG_SERVO_ANGLE = 40              # 舵机测试角度（仅幅度，方向固定为负=夹紧）
 SERVO_MAX_ANGLE = 300               # 🚨 机械极限！实测夹爪最大300°，超过报废
 SERVO_MOVE_SPEED = 30               # 舵机移动速度
-# 自适应夹爪参数（二号臂舵机 M6-INDEX2，R2 键触发）
+# 自适应夹爪参数（一号臂舵机 M6-INDEX1 + 二号臂舵机 M6-INDEX2，键B 触发）
 # 检测策略：速度归零=堵转（夹到东西或到机械限位），比电流检测更抗摩擦干扰
 GRIP_SPEED_THRESHOLD = 5    # 堵转速度阈值 (rpm)，低于此值=已夹到
 GRIP_CLOSE_POWER = -25         # 夹紧功率（负=夹紧，慢速）
 GRIP_TIMEOUT = 5.0             # 夹取超时（秒）
 GRIP_SETTLE_TIME = 0.3         # 启动延迟（秒），避开电机启动阶段
-DEBUG_ALL_NAMES = [DEBUG_MOTOR_NAMES, DEBUG_DC_NAMES, DEBUG_LIFT_NAMES, DEBUG_SERVO_NAMES]
+
+# 功能键配置（可替换为任意物理按键，后续统一调整）
+KEY_FUNC_A = "N2"           # 键A: Face0=DC1收球, Face1/2=升降档位切换
+KEY_FUNC_B = "R2"           # 键B: Face0=BL发射, Face1/2=自适应夹爪
+# 面→硬件映射（按 face 查表分发按键功能）
+#   FACE_LIFT_MOTOR[face]: 当前面升降臂电机 (0=M4, 1=M5, None=无)
+#   FACE_GRIP_SERVO[face]: 当前面夹爪舵机   (0=SV1, 1=SV2, None=无)
+FACE_LIFT_MOTOR = [None, 1, 0]   # Face0=无, Face1=M5(idx1), Face2=M4(idx0)
+FACE_GRIP_SERVO = [None, 1, 0]   # Face0=无, Face1=SV2(idx1), Face2=SV1(idx0)
+DEBUG_ALL_NAMES = [DEBUG_MOTOR_NAMES, DEBUG_DC_NAMES, DEBUG_LIFT_NAMES, DEBUG_SERVO_NAMES, DEBUG_BLDC_NAMES]
 
 # 升降臂 PID 控制参数（到位自动停电，机械张力维持位置）
 LIFT_PID_KP = 0.35          # 比例增益
@@ -180,7 +214,7 @@ FACE_NAMES = [
 __motor_M1 = encoder_motor_class("M1", "INDEX1")
 __motor_M2 = encoder_motor_class("M2", "INDEX1")
 __motor_M3 = encoder_motor_class("M3", "INDEX1")
-__motor_M4 = encoder_motor_class("M4", "INDEX1")  # M4: 收球编码电机
+__motor_M4 = encoder_motor_class("M4", "INDEX1")  # M4: 一号臂升降编码电机
 __motor_M5 = encoder_motor_class("M5", "INDEX1")  # M5: 二号臂升降编码电机
 
 # 智能舵机（M6 端口链：INDEX1=一号臂夹取, INDEX2=二号臂夹取）
@@ -195,6 +229,11 @@ __led = led_matrix_class(LED_PORT, LED_INDEX)     # 8x16 点阵屏
 
 # 开机时舵机归零位（全开安全位，避免之前测试残留角度）
 if _HAS_SERVO:
+    try:
+        __servo_1.move_to(0, 30)
+        print(">>> 舵机开机归零: SV1 → 0° (全开)")
+    except Exception:
+        pass
     try:
         __servo_2.move_to(0, 30)
         print(">>> 舵机开机归零: SV2 → 0° (全开)")
@@ -214,9 +253,9 @@ face = 0  # 当前正面: 0=M1-M2, 1=M2-M3, 2=M3-M1
 #   避免瞬间跳变带来的电流冲击 / 轮子打滑 / 机身震动。
 #   0 = 立即切换（旧行为）；100ms 是常用值；200ms 最软但路径偏差稍大。
 #   该常量会被 trajectory_planner 导出时覆盖。
-AUTO_RAMP_MS = 100
-AUTO_ACCEL_MS = 250             # ms: within-step 0→100→0 acceleration ramp (防打滑)
-ENCODER_TICKS_PER_CM = 18.0000  # auto-injected by trajectory_planner
+AUTO_RAMP_MS = 0
+AUTO_ACCEL_MS = 0               # ms: within-step 0→100→0 acceleration ramp (防打滑)
+ENCODER_TICKS_PER_CM = 18.0000
 
 # 摇杆指数曲线: 1.0=线性, 2.0=二次, 3.0=三次 (推荐1.5~2.5)
 JOYSTICK_EXPO = 2.0
@@ -228,11 +267,10 @@ INVERT_VY = True
 INVERT_OMEGA = False
 
 # ==================== 编码器闭环参数（基于 novapi get_value("angle") 角度制）====================
-# 轮子周长 → 角度换算：1 cm = 360° / 轮周长
-_WHEEL_CIRCUMFERENCE_CM = 31.4159  # π × 10cm（与四轮车共用轮径）
-_DEG_PER_CM = 360.0 / _WHEEL_CIRCUMFERENCE_CM
-# ticks → 度 换算因子
-_TICKS_TO_DEG = _DEG_PER_CM / ENCODER_TICKS_PER_CM
+# Novapi move() 使用编码器角度。这里必须用实测角度/cm，
+# 不能用理想轮周 360/(πD)，否则实际距离会明显偏小。
+_DEG_PER_CM = ENCODER_TICKS_PER_CM
+_TICKS_TO_DEG = 1.0
 # 到位死区（度）：电机角度误差小于此值视为到达
 PROFILE_DEADBAND_DEG = 8
 # 每步最大等待时间（秒），防止卡死
@@ -240,8 +278,9 @@ _ENC_STEP_TIMEOUT = 8.0
 # 功率 → rpm 映射（move(deg, rpm) 的速度参数）
 _RPM_PER_POWER = 8.0
 
-# ==================== M4 收球电机配置 ====================
-M4_COLLECTOR_SPEED = 100   # M4 收球速度（+100 = 正转收球）
+# ==================== M4/M5 升降臂配置 ====================
+# M4: 一号臂升降编码电机（PID 控制待接入）
+# M5: 二号臂升降编码电机（PID 控制已接入）
 
 # ==================== 面切换旋转配置（编码器闭环 + PID）====================
 # FACE_ROTATE_WHEEL_DEG: 120° 底盘旋转 → 每个轮子需要转动的角度（度）
@@ -268,18 +307,32 @@ FACE_ROTATE_DECEL_ZONE = 0.40    # 余弦减速区间：最后30%误差时开始
 # 面切换后 LED 显示时长
 FACE_SHOW_MS = 800                # 换面完成后显示面名称的毫秒数
 
+FRONT_BACK_COMPENSATION = 0.0000
+ROTATION_BALANCE = 0.0000
+STRAFE_VY_COUPLING = 0.0000
 AUTO_SEQUENCE = [
-    # === Auto-generated by trajectory_planner on 2026-07-05 17:55 ===
+    # === Auto-generated by trajectory_planner on 2026-07-06 15:29 ===
     # Source: (unsaved)  |  Format: v5-encoder
     # Mode: translation | speed: 100.0 cm/s | power: 85
-    ('enc_move', 90, 44, 0),
-    ('enc_move', 1350, 83, 0),
-    ('enc_move', 89, 50, 0),
-    ('enc_move', 58, 23, 0),
-    ('enc_stop', 0, 0, 0),
-    ('enc_move', 90, 38, 0),
-    ('enc_move', 1620, 73, 0),
-    ('enc_move', 48, 34, 0),
+    ('enc_move', 90, 29, 33),
+    ('enc_move', 630, 54, 63),
+    ('enc_move', 720, 37, 76),
+    ('enc_move', 88, 45, 72),
+    ('enc_move', 89, 85, -1),
+    ('enc_move', 360, 85, -9),
+    ('enc_move', 48, 77, 37),
+    ('enc_move', 539, -2, 85),
+    ('enc_move', 179, -7, -85),
+    ('enc_move', 360, -31, -79),
+    ('enc_move', 180, -6, -85),
+    ('enc_move', 55, 50, -68),
+    ('enc_move', 540, 66, 52),
+    ('enc_move', 180, 78, 33),
+    ('enc_move', 159, -79, 32),
+    ('enc_move', 540, -72, 45),
+    ('enc_move', 34, -46, -72),
+    ('enc_move', 630, 38, -74),
+    ('enc_move', 67, 18, -35),
     ('enc_stop', 0, 0, 0),
 ]
 
@@ -300,27 +353,31 @@ _enc_step_initialized = -1          # 已初始化的 auto_step 索引
 _enc_step_start_time = 0.0          # 当前步开始时刻
 
 # ==================== 收球开关状态 ====================
-collector_on = False     # DC1 收球电机当前状态: False=关, True=开
-m4_collector_on = False  # M4 收球编码电机状态: False=关, True=开（N2 切换）
-lift_gear = 0            # 当前升降档位: 0=L0(底部), 1=L1(330°), 2=L2(660°)
+collector_on = False     # DC1 收球电机当前状态: False=关, True=开（换面保持）
+lift_gear = [0, 0]       # [M4一号臂, M5二号臂] 升降档位: 0=L0(底部), 1=L1(330°), 2=L2(660°)
 
-# 自适应夹爪状态（R2 键切换，二号臂舵机）
-adaptive_grip_active = False   # R2 切换开关
-adaptive_grip_closing = False  # 正在夹紧中（监测电流）
-adaptive_grip_hold = False     # 已夹到东西，保持中
-_grip_start_time = 0.0         # 夹取开始时刻
-_grip_settled = False          # 启动延迟完成，开始监测电流
-_grip_last_print = 0.0         # 上次打印电流的时刻
+# 无刷电机状态（BL1/BL2 发射小球）
+bl1_on = False            # BL1 无刷电机开关
+bl2_on = False            # BL2 无刷电机开关
 
-# 升降臂 PID 状态（到位后自动停电，避免电机过热）
-_lift_pid_active = False
-_lift_pid_target = 0.0
-_lift_pid_integral = 0.0
-_lift_pid_last_error = 0.0
-_lift_pid_last_time = 0.0
-_lift_pid_settle_start = 0.0
-_lift_pid_settled = False
-_lift_pid_start_time = 0.0
+# 自适应夹爪状态 [0]=SV1一号臂, [1]=SV2二号臂（键B 触发）
+_grip_active = [False, False]    # 切换开关
+_grip_closing = [False, False]   # 正在夹紧中（监测速度）
+_grip_hold = [False, False]      # 已夹到东西，保持中
+_grip_start_time = [0.0, 0.0]    # 夹取开始时刻
+_grip_settled = [False, False]   # 启动延迟完成
+_grip_last_print = [0.0, 0.0]    # 上次打印速度的时刻
+
+# 升降臂 PID 状态 [0]=M4一号臂, [1]=M5二号臂（到位后自动停电，避免电机过热）
+# 两个臂完全独立：换面不中断对方运动，各自到位各自停电
+_lift_pid_active = [False, False]
+_lift_pid_target = [0.0, 0.0]
+_lift_pid_integral = [0.0, 0.0]
+_lift_pid_last_error = [0.0, 0.0]
+_lift_pid_last_time = [0.0, 0.0]
+_lift_pid_settle_start = [0.0, 0.0]
+_lift_pid_settled = [False, False]
+_lift_pid_start_time = [0.0, 0.0]
 
 # ==================== 面切换旋转状态（L1 触发，编码器闭环 + PID）====================
 face_rotating = False           # True = 正在执行面切换旋转
@@ -442,12 +499,14 @@ def apply_dead_zone(value, threshold=DEAD_ZONE):
 
 
 def stop_all_motors():
-    """紧急停止所有电机（含 M4 收球、M5 升降臂、舵机）"""
+    """紧急停止所有电机（含 M4 收球、M5 升降臂、舵机、无刷电机）"""
     __motor_M1.set_power(0)
     __motor_M2.set_power(0)
     __motor_M3.set_power(0)
     __motor_M4.set_power(0)
     __motor_M5.set_power(0)
+    power_expand_board.stop("BL1")
+    power_expand_board.stop("BL2")
     if _HAS_SERVO:
         try:
             __servo_1.set_power(0)
@@ -472,6 +531,14 @@ def debug_stop_motor():
                 servo.set_power(0)
             except Exception:
                 pass
+    elif debug_motor_type == 4:  # 无刷电机
+        if debug_motor_index == 2:  # BL12：双电机同时
+            power_expand_board.stop("BL1")
+            power_expand_board.stop("BL2")
+            power_expand_board.set_power(DC_COLLECTOR_PORT, 0)  # DC1 也停
+        else:
+            port = ["BL1", "BL2"][debug_motor_index]
+            power_expand_board.stop(port)
 
 
 def debug_cal_start(angle):
@@ -534,7 +601,6 @@ def debug_cal_tick():
         _cal_delta_M3 = __motor_M3.get_value("angle") - 0  # M3 不动
         _debug_cal_done = True
         print(">>> 标定完成! M1实际=%.0f° M2实际=%.0f°" % (M1_final, M2_final))
-        __led.show("F%d" % int(abs(M2_final)))
         return False
 
     # ==== S 曲线速度因子 ====
@@ -570,9 +636,6 @@ def debug_cal_tick():
 
     __motor_M1.set_power(M1_power)
     __motor_M2.set_power(M2_power)
-
-    # 显示屏实时刷新当前编码值（M2 为参考）
-    __led.show("E%d" % int(abs(M2_cur)))
 
     return True
 
@@ -833,85 +896,106 @@ def face_rotate_tick():
     return False
 
 
-# ==================== 升降臂 PID 控制（单电机 M5）====================
-# 到位后自动停电，依靠机械张力维持位置，避免电机过热
+# ==================== 升降臂 PID 控制（双通道：M4一号臂 + M5二号臂）====================
+# 两个臂完全独立：各自 PID、各自到位停电、换面不中断对方运动
+# 到位后自动停电，依靠机械蜗杆自锁维持位置，避免电机过热
 
-def lift_pid_start(target_deg):
-    """启动升降臂 PID 控制，移动到目标角度（度）"""
+# 电机引用表（与 PID 状态数组同索引）
+_LIFT_MOTORS = [None, None]  # 延迟初始化，避免模块加载顺序问题
+
+def _init_lift_motors():
+    """延迟初始化升降臂电机引用（避免硬件未就绪时访问）"""
+    global _LIFT_MOTORS
+    if _LIFT_MOTORS[0] is None:
+        _LIFT_MOTORS = [__motor_M4, __motor_M5]
+
+def lift_pid_start(motor_idx, target_deg):
+    """启动升降臂 PID 控制
+    motor_idx: 0=M4(一号臂), 1=M5(二号臂)
+    target_deg: 目标编码器角度（度）
+    """
     global _lift_pid_active, _lift_pid_target
     global _lift_pid_integral, _lift_pid_last_error, _lift_pid_last_time
     global _lift_pid_settle_start, _lift_pid_settled, _lift_pid_start_time
 
-    _lift_pid_target = target_deg
-    _lift_pid_integral = 0.0
-    _lift_pid_last_error = 0.0
-    _lift_pid_last_time = novapi.timer()
-    _lift_pid_settle_start = 0.0
-    _lift_pid_settled = False
-    _lift_pid_start_time = novapi.timer()
-    _lift_pid_active = True
+    _init_lift_motors()
+    _lift_pid_target[motor_idx] = target_deg
+    _lift_pid_integral[motor_idx] = 0.0
+    _lift_pid_last_error[motor_idx] = 0.0
+    _lift_pid_last_time[motor_idx] = novapi.timer()
+    _lift_pid_settle_start[motor_idx] = 0.0
+    _lift_pid_settled[motor_idx] = False
+    _lift_pid_start_time[motor_idx] = novapi.timer()
+    _lift_pid_active[motor_idx] = True
 
 
-def lift_pid_tick():
-    """升降臂 PID 单步更新。返回 True=已到位停电, False=仍在控制中"""
+def lift_pid_tick(motor_idx):
+    """升降臂 PID 单步更新。返回 True=已到位停电, False=仍在控制中
+    motor_idx: 0=M4(一号臂), 1=M5(二号臂)
+    """
     global _lift_pid_integral, _lift_pid_last_error, _lift_pid_last_time
     global _lift_pid_settle_start, _lift_pid_settled, _lift_pid_active
 
-    if not _lift_pid_active:
+    _init_lift_motors()
+    motor = _LIFT_MOTORS[motor_idx]
+
+    if not _lift_pid_active[motor_idx]:
         return True
 
     now = novapi.timer()
 
     # 超时保护
-    if now - _lift_pid_start_time > LIFT_TIMEOUT:
-        __motor_M5.set_power(0)
-        _lift_pid_active = False
-        print(">>> 升降臂PID: 超时强制停电")
+    if now - _lift_pid_start_time[motor_idx] > LIFT_TIMEOUT:
+        motor.set_power(0)
+        _lift_pid_active[motor_idx] = False
+        arm_name = "M4一号臂" if motor_idx == 0 else "M5二号臂"
+        print(">>> 升降臂PID(%s): 超时强制停电" % arm_name)
         return True
 
-    cur_deg = __motor_M5.get_value("angle")
-    error = _lift_pid_target - cur_deg
+    cur_deg = motor.get_value("angle")
+    error = _lift_pid_target[motor_idx] - cur_deg
 
     # 到位检测 + 稳定确认
     if abs(error) <= LIFT_DEADBAND:
-        if not _lift_pid_settled:
-            _lift_pid_settled = True
-            _lift_pid_settle_start = now
-        elif now - _lift_pid_settle_start >= LIFT_SETTLE_TIME:
-            __motor_M5.set_power(0)
-            _lift_pid_active = False
-            _lift_pid_settled = False
-            print(">>> 升降臂PID: 到位停电 (误差=%.1f°)" % error)
+        if not _lift_pid_settled[motor_idx]:
+            _lift_pid_settled[motor_idx] = True
+            _lift_pid_settle_start[motor_idx] = now
+        elif now - _lift_pid_settle_start[motor_idx] >= LIFT_SETTLE_TIME:
+            motor.set_power(0)
+            _lift_pid_active[motor_idx] = False
+            _lift_pid_settled[motor_idx] = False
+            arm_name = "M4" if motor_idx == 0 else "M5"
+            print(">>> 升降臂PID(%s): 到位停电 (误差=%.1f°)" % (arm_name, error))
             return True
         # 稳定中：保持零功率，清零积分
-        __motor_M5.set_power(0)
-        _lift_pid_integral = 0.0
-        _lift_pid_last_error = 0.0
+        motor.set_power(0)
+        _lift_pid_integral[motor_idx] = 0.0
+        _lift_pid_last_error[motor_idx] = 0.0
         return False
     else:
-        _lift_pid_settled = False
-        _lift_pid_settle_start = 0.0
+        _lift_pid_settled[motor_idx] = False
+        _lift_pid_settle_start[motor_idx] = 0.0
 
     # PID 计算
-    dt = now - _lift_pid_last_time
+    dt = now - _lift_pid_last_time[motor_idx]
     if dt <= 0:
         dt = LOOP_DELAY
-    _lift_pid_last_time = now
+    _lift_pid_last_time[motor_idx] = now
 
     if LIFT_PID_KI > 0:
-        _lift_pid_integral += error * dt
+        _lift_pid_integral[motor_idx] += error * dt
         max_integral = LIFT_MAX_SPEED / LIFT_PID_KI
-        _lift_pid_integral = max(-max_integral, min(max_integral, _lift_pid_integral))
+        _lift_pid_integral[motor_idx] = max(-max_integral, min(max_integral, _lift_pid_integral[motor_idx]))
 
-    derivative = (error - _lift_pid_last_error) / dt if dt > 0 else 0
-    _lift_pid_last_error = error
+    derivative = (error - _lift_pid_last_error[motor_idx]) / dt if dt > 0 else 0
+    _lift_pid_last_error[motor_idx] = error
 
     power = (LIFT_PID_KP * error
-             + LIFT_PID_KI * _lift_pid_integral
+             + LIFT_PID_KI * _lift_pid_integral[motor_idx]
              + LIFT_PID_KD * derivative)
 
     # 余弦减速
-    decel_threshold = max(abs(_lift_pid_target) * LIFT_DECEL_ZONE, LIFT_DEADBAND * 4)
+    decel_threshold = max(abs(_lift_pid_target[motor_idx]) * LIFT_DECEL_ZONE, LIFT_DEADBAND * 4)
     if abs(error) < decel_threshold:
         decel_progress = 1.0 - (abs(error) / max(decel_threshold, 1.0))
         speed_limit = LIFT_MIN_SPEED + (LIFT_MAX_SPEED - LIFT_MIN_SPEED) * math.cos(decel_progress * math.pi / 2.0)
@@ -924,8 +1008,14 @@ def lift_pid_tick():
     if abs(power) < LIFT_MIN_SPEED and abs(error) > LIFT_DEADBAND:
         power = LIFT_MIN_SPEED if error > 0 else -LIFT_MIN_SPEED
 
-    __motor_M5.set_power(power)
+    motor.set_power(power)
     return False
+
+
+def lift_pid_tick_all():
+    """更新所有升降臂 PID（每帧调用一次）"""
+    lift_pid_tick(0)  # M4 一号臂
+    lift_pid_tick(1)  # M5 二号臂
 
 
 # ==================== 边沿触发辅助变量 ====================
@@ -944,30 +1034,30 @@ last_N2 = False
 last_N3 = False
 last_N4 = False
 last_R2 = False           # 正常模式 R2 边沿
+last_L2 = False           # 正常模式 L2 边沿
 last_L1_debug = False
 last_R1_debug = False
 
 # 正常模式 D-pad 边沿
 last_Dpad_Up_norm = False
 last_Dpad_Down_norm = False
+last_Dpad_Left_norm = False
+last_Dpad_Right_norm = False
 
 # ==================== 启动确认 ====================
 print("=" * 40)
 print("  三轮全向机器人已启动！")
 print("  左摇杆 → 全向移动")
 print("  右摇杆 ←→ 自旋")
-print("  L1 → 顺时针换面（PID旋转120°）")
-print("  D-pad ↑↓ → 升降臂档位 L0/L1/L2")
-print("  N3 → 升降臂回零档 L0")
-print("  N2 → M4收球切换（+100转/停）")
-print("  N1 → DC1收球开关")
-print("  R2 → 自适应夹爪（按=夹/再按=放）")
+print("  L1 → 顺时针换面（PID旋转120°+功能键重映射）")
+print("  Face 0(收球面): D-pad ↑↓=BL调速 键A(N2)=DC1收球 键B(R2)=BL发射")
+print("  Face 1(二号臂): D-pad ↑↓=M5升降 键A(N2)=档位 键B(R2)=夹取 N3=回零")
+print("  Face 2(一号臂): D-pad ↑↓=M4升降 键A(N2)=档位 键B(R2)=夹取 N3=回零")
 print("  + 键 → 自动程序")
 print("  ≡ 键 → 调试模式开关")
 print("=" * 40)
 
 # 点阵屏开机显示
-__led.show("Main")
 novapi.reset_timer()
 
 # ==================== 主循环 ====================
@@ -995,8 +1085,6 @@ while True:
                     _enc_cal_auto_started = True
                     print(">>> 编码器标定开始！记录初始编码 M1=%.0f M2=%.0f M3=%.0f" %
                           (_enc_cal_M1_start, _enc_cal_M2_start, _enc_cal_M3_start))
-                    __led.show("CAL")
-
                 if elapsed >= cal_dur:
                     M1_end = __motor_M1.get_value("angle")
                     M2_end = __motor_M2.get_value("angle")
@@ -1009,7 +1097,6 @@ while True:
                     stop_all_motors()
                     auto_mode = False
                     auto_step = 0
-                    __led.show("done")
                     print(">>> 编码器标定完成！增量: M1=%d M2=%d M3=%d" %
                           (_cal_delta_M1, _cal_delta_M2, _cal_delta_M3))
                     print("    按 N1/N2/N3 在 LED 查看各电机增量（E####）")
@@ -1152,6 +1239,7 @@ while True:
                 auto_prev_omega = 0.0
                 print(">>> 自动程序完成")
 
+            __led.show("S%d" % BL_ACTION_SPEED)
             time.sleep(AUTO_STEP_DELAY)
             continue
 
@@ -1227,6 +1315,7 @@ while True:
             __motor_M2.set_power(M2_power)
             __motor_M3.set_power(M3_power)
 
+        __led.show("S%d" % BL_ACTION_SPEED)
         time.sleep(AUTO_STEP_DELAY)
         continue  # 跳过手动/调试逻辑
 
@@ -1273,7 +1362,6 @@ while True:
             debug_cal_running = False
             debug_cal_done_time = 0.0
             stop_all_motors()
-            __led.show("Main")
             print(">>> ≡ 退出调试模式，恢复正常操控")
             last_Up = last_Down = last_Left = last_Right = False
             last_N1 = last_N2 = last_N3 = last_N4 = False
@@ -1310,7 +1398,6 @@ while True:
                 dur0, Vx0, Vy0, w0 = step0
                 print(">>> 自动程序启动（从调试模式）！步骤 1/%d: Vx=%d Vy=%d ω=%d (%.1fs)" %
                       (len(AUTO_SEQUENCE), Vx0, Vy0, w0, dur0))
-            __led.show("auto")
             last_Up = last_Down = last_Left = last_Right = False
             last_N1 = last_N2 = last_N3 = last_N4 = False
             last_L1_debug = last_R1_debug = False
@@ -1359,10 +1446,8 @@ while True:
                     continue
                 else:
                     debug_cal_done_time = 0.0
-                    __led.show("E%d" % CAL_ANGLE)
 
             # --- 空闲状态：等待自动启动或手动触发 ---
-            __led.show("E%d" % CAL_ANGLE)
 
             # 自动启动：进入标定模式 1 秒后自动执行
             if debug_cal_auto_start and novapi.timer() - debug_cal_auto_time >= 1.0:
@@ -1393,7 +1478,6 @@ while True:
                 debug_cal_done_time = 0.0
                 debug_cal_auto_start = False
                 stop_all_motors()
-                __led.show("Test")
                 print(">>> 退出标定模式，返回调试模式")
                 last_Up = last_Down = last_Left = last_Right = False
                 last_N1 = last_N2 = last_N3 = False
@@ -1424,7 +1508,6 @@ while True:
             debug_cal_done_time = 0.0
             debug_cal_auto_start = True
             debug_cal_auto_time = novapi.timer()
-            __led.show("E%d" % CAL_ANGLE)
             print("=" * 40)
             print("  >>> 进入标定模式！1秒后自动执行...")
             print("  目标: %d cm | 编码: %d°" % (CAL_TARGET_CM, CAL_ANGLE))
@@ -1446,10 +1529,10 @@ while True:
                 debug_motor_index = 0
             if debug_motor_type == 2:
                 # 进入升降臂时显示当前档位名
-                __led.show(DEBUG_LIFT_NAMES[debug_lift_gear_index])
+                pass
             else:
                 name = DEBUG_ALL_NAMES[debug_motor_type][debug_motor_index]
-                __led.show(name)
+                pass
             print(">>> 电机类型: %s" % DEBUG_MOTOR_TYPES[debug_motor_type])
         if cur_Down and not last_Down:
             debug_motor_type = (debug_motor_type - 1) % len(DEBUG_MOTOR_TYPES)
@@ -1457,10 +1540,10 @@ while True:
             if debug_motor_index > max_idx:
                 debug_motor_index = 0
             if debug_motor_type == 2:
-                __led.show(DEBUG_LIFT_NAMES[debug_lift_gear_index])
+                pass
             else:
                 name = DEBUG_ALL_NAMES[debug_motor_type][debug_motor_index]
-                __led.show(name)
+                pass
             print(">>> 电机类型: %s" % DEBUG_MOTOR_TYPES[debug_motor_type])
 
         # --- 十字键 ←/→：切换子项（升降臂模式切档位，其他模式切编号）---
@@ -1468,55 +1551,38 @@ while True:
             # 升降臂模式：←/→ 切换档位
             if cur_Left and not last_Left:
                 debug_lift_gear_index = (debug_lift_gear_index - 1) % len(DEBUG_LIFT_GEARS)
-                __led.show(DEBUG_LIFT_NAMES[debug_lift_gear_index])
                 print(">>> 升降臂档位: %s (%d°)" % (DEBUG_LIFT_NAMES[debug_lift_gear_index], DEBUG_LIFT_GEARS[debug_lift_gear_index]))
             if cur_Right and not last_Right:
                 debug_lift_gear_index = (debug_lift_gear_index + 1) % len(DEBUG_LIFT_GEARS)
-                __led.show(DEBUG_LIFT_NAMES[debug_lift_gear_index])
                 print(">>> 升降臂档位: %s (%d°)" % (DEBUG_LIFT_NAMES[debug_lift_gear_index], DEBUG_LIFT_GEARS[debug_lift_gear_index]))
         else:
             max_idx = len(DEBUG_ALL_NAMES[debug_motor_type]) - 1
             if cur_Left and not last_Left:
                 debug_motor_index = (debug_motor_index - 1) % (max_idx + 1)
                 name = DEBUG_ALL_NAMES[debug_motor_type][debug_motor_index]
-                __led.show(name)
                 print(">>> 电机编号: %s" % name)
             if cur_Right and not last_Right:
                 debug_motor_index = (debug_motor_index + 1) % (max_idx + 1)
                 name = DEBUG_ALL_NAMES[debug_motor_type][debug_motor_index]
-                __led.show(name)
                 print(">>> 电机编号: %s" % name)
 
-        # --- 空闲显示：速度超时后恢复电机名，标定完成显示增量 ---
+        # --- 空闲显示 ---
         if not cur_N1 and not cur_N4:
-            if _debug_cal_done:
-                pass  # 标定后保持增量显示
-            elif debug_show_ok:
+            if debug_show_ok:
                 if novapi.timer() >= debug_show_speed_until:
                     debug_show_ok = False
             elif debug_show_speed_until > 0 and novapi.timer() < debug_show_speed_until:
-                if debug_motor_type == 3:
-                    __led.show("A%d" % DEBUG_SERVO_ANGLE)
-                elif debug_motor_type == 2:
-                    __led.show("A%d" % DEBUG_LIFT_GEARS[debug_lift_gear_index])
-                else:
-                    __led.show("S%d" % DEBUG_TEST_SPEED)
+                pass  # 速度/角度值在print中显示，LED统一显示BL速度
             else:
-                if debug_motor_type == 2:
-                    __led.show(DEBUG_LIFT_NAMES[debug_lift_gear_index])
-                else:
-                    __led.show(DEBUG_ALL_NAMES[debug_motor_type][debug_motor_index])
+                pass  # 电机名在print中显示，LED统一显示BL速度
 
-        # --- 标定完成后：N1/N2/N3 查看各电机增量 ---
+        # --- 标定完成后：N1/N2/N3 查看各电机增量（仅print，LED统一显示BL速度）---
         if _debug_cal_done:
             if cur_N1 and not last_N1:
-                __led.show("E%d" % _cal_delta_M1)
                 print(">>> M1 编码增量: %d" % _cal_delta_M1)
             if cur_N2 and not last_N2:
-                __led.show("E%d" % _cal_delta_M2)
                 print(">>> M2 编码增量: %d" % _cal_delta_M2)
             if cur_N3 and not last_N3:
-                __led.show("E%d" % _cal_delta_M3)
                 print(">>> M3 编码增量: %d" % _cal_delta_M3)
 
         # --- N1 / N4：正转/反转 或 升降臂去档位/回零 或 舵机移动/回零 ---
@@ -1538,15 +1604,13 @@ while True:
                 speed = 0
             power_expand_board.set_power(DC_COLLECTOR_PORT, speed)
         elif debug_motor_type == 2:
-            # 升降臂模式：N1→去档位, N4→回零（PID + 到位停电）
+            # 升降臂模式：N1→去档位, N4→回零（PID + 到位停电，调试仅控M5二号臂）
             if cur_N1 and not last_N1:
                 target_deg = DEBUG_LIFT_GEARS[debug_lift_gear_index]
-                lift_pid_start(target_deg)
-                __led.show(DEBUG_LIFT_NAMES[debug_lift_gear_index])
+                lift_pid_start(1, target_deg)
                 print(">>> 升降臂: M5 → %s (%d°)" % (DEBUG_LIFT_NAMES[debug_lift_gear_index], target_deg))
             if cur_N4 and not last_N4:
-                lift_pid_start(0)
-                __led.show("L0")
+                lift_pid_start(1, 0)
                 print(">>> 升降臂: M5 → 零点")
         elif debug_motor_type == 3:
             # 舵机模式：N1→测试角度, N4→回零
@@ -1557,12 +1621,26 @@ while True:
                     _sv = None
                 if cur_N1 and not last_N1 and _sv:
                     _sv.move_to(servo_dir * DEBUG_SERVO_ANGLE, SERVO_MOVE_SPEED)
-                    __led.show("A%d" % DEBUG_SERVO_ANGLE)
                     print(">>> 舵机 %s: → %d° (夹紧)" % (DEBUG_SERVO_NAMES[debug_motor_index], servo_dir * DEBUG_SERVO_ANGLE))
                 if cur_N4 and not last_N4 and _sv:
                     _sv.move_to(0, SERVO_MOVE_SPEED)
-                    __led.show("SV0")
                     print(">>> 舵机 %s: → 0° (全开)" % DEBUG_SERVO_NAMES[debug_motor_index])
+        elif debug_motor_type == 4:
+            # 无刷电机模式：N1→转动, N4→停止
+            if cur_N1:
+                speed = DEBUG_TEST_SPEED
+            elif cur_N4:
+                speed = 0
+            else:
+                speed = 0
+            if debug_motor_index == 2:  # BL12：双电机同时
+                power_expand_board.set_power("BL1", speed)
+                power_expand_board.set_power("BL2", speed)
+                # DC1 以 -100 反转辅助（配合无刷发射小球）
+                power_expand_board.set_power(DC_COLLECTOR_PORT, -100 if speed != 0 else 0)
+            else:
+                port = ["BL1", "BL2"][debug_motor_index]
+                power_expand_board.set_power(port, speed)
 
         # --- N2 / N3：调整测试速度/升降臂角度/舵机角度 ± ---
         if cur_N2 and not last_N2:
@@ -1597,7 +1675,6 @@ while True:
             try:
                 _sv = [__servo_1, __servo_2][debug_motor_index]
                 _sv.set_zero()
-                __led.show("OK")
                 debug_show_speed_until = novapi.timer() + 1.0
                 debug_show_ok = True
                 print(">>> 舵机 %s: 零点已设置" % DEBUG_SERVO_NAMES[debug_motor_index])
@@ -1608,7 +1685,6 @@ while True:
         if debug_motor_type == 2 and cur_L1 and not last_L1_debug:
             debug_motor_type = 0
             debug_motor_index = 0
-            __led.show(DEBUG_ALL_NAMES[0][0])
             print(">>> 升降臂: 退出 → 编码电机模式")
         if debug_motor_type == 3 and cur_L1 and not last_L1_debug:
             servo_dir = -servo_dir
@@ -1630,9 +1706,11 @@ while True:
         last_R1_debug = cur_R1
         last_Menu = cur_Menu
 
-        # 升降臂 PID 每帧更新
-        lift_pid_tick()
+        # 升降臂 PID 每帧更新（双臂同时，仅在活跃时运行）
+        if _lift_pid_active[0] or _lift_pid_active[1]:
+            lift_pid_tick_all()
 
+        __led.show("S%d" % BL_ACTION_SPEED)
         time.sleep(LOOP_DELAY)
         continue  # 跳过正常模式
 
@@ -1654,12 +1732,12 @@ while True:
                   (FACE_NAMES[face], face_rot_target_deg))
 
         if face_rotate_tick():
-            # 旋转完成，显示当前面名称
+            # 旋转完成
             face_show_until = novapi.timer() + FACE_SHOW_MS / 1000.0
-            __led.show("F%d" % face)
             print(">>> 面切换完成: %s" % FACE_NAMES[face])
 
         last_L1 = cur_L1
+        __led.show("S%d" % BL_ACTION_SPEED)
         time.sleep(LOOP_DELAY)
         continue
 
@@ -1671,6 +1749,7 @@ while True:
     # --- 2. 按键边沿触发 ---
     cur_R1 = gamepad.is_key_pressed("R1")
     cur_R2 = gamepad.is_key_pressed("R2")
+    cur_L2 = gamepad.is_key_pressed("L2")
     # cur_L1 已在正常模式顶部读取，此处不重复
     cur_Plus = gamepad.is_key_pressed("+")
     cur_Menu = gamepad.is_key_pressed("≡")
@@ -1680,6 +1759,8 @@ while True:
     cur_N4 = gamepad.is_key_pressed("N4")
     cur_Dpad_Up = gamepad.is_key_pressed("Up")
     cur_Dpad_Down = gamepad.is_key_pressed("Down")
+    cur_Dpad_Left = gamepad.is_key_pressed("Left")
+    cur_Dpad_Right = gamepad.is_key_pressed("Right")
 
     if cur_Menu and not last_Menu:      # ≡ 上升沿 → 调试模式开关
         if debug_mode:
@@ -1690,7 +1771,6 @@ while True:
             debug_cal_running = False
             debug_cal_done_time = 0.0
             stop_all_motors()
-            __led.show("Main")
             print(">>> ≡ 退出调试模式，恢复正常操控")
             last_Up = last_Down = last_Left = last_Right = False
             last_N1 = last_N2 = last_N3 = last_N4 = False
@@ -1705,7 +1785,6 @@ while True:
             debug_cal_mode = False
             debug_cal_running = False
             debug_cal_done_time = 0.0
-            __led.show("Test")
             # 重置调试按键边沿防止残留触发
             last_Up = last_Down = last_Left = last_Right = False
             last_N1 = last_N2 = last_N3 = last_N4 = False
@@ -1716,134 +1795,181 @@ while True:
             print("  ↑↓ 切换类型 | ← → 切换子项/升降档位")
             print("  N1=正转/去档位  N4=反转/回零")
             print("  N2/N3=调速/调角度  |  L1+R1=标定模式")
-            print("  编码电机 M1-M4 | 直流 DC1 | 升降臂 L0-L2 | 舵机 SV1-SV2")
+            print("  编码电机 M1-M4 | 直流 DC1 | 升降臂 L0-L2 | 舵机 SV1-SV2 | 无刷 BL1-BL2")
             print("  舵机: R1=设零点 L1=方向 | 升降臂: L1=退出")
+            print("  无刷: N1=转  N4=停  N2/N3=调速")
             print("=" * 40)
-            # 屏幕显示默认电机
-            __led.show("M1")
+            # 屏幕默认显示BL速度
         continue
 
-    if cur_R1 and not last_R1:          # R1 → 无操作（已移除面切换）
-        pass
+    # ================================================================
+    #  按键处理 — 面映射分发
+    #  键A(N2): Face0=DC1收球  Face1/2=升降档位
+    #  键B(R2): Face0=BL发射    Face1/2=自适应夹爪
+    #  D-pad↑↓: Face0=BL调速   Face1/2=升降档位
+    #  N3:      Face1/2=回零   Face0=无
+    #  R1/N1:   已由键A/键B/面映射接管，原功能迁移
+    # ================================================================
+    cur_motor_idx = FACE_LIFT_MOTOR[face]    # 当前面升降臂索引 (None/0/1)
+    cur_servo_idx = FACE_GRIP_SERVO[face]    # 当前面夹爪索引   (None/0/1)
 
-    if cur_L1 and not last_L1:          # L1 上升沿 → 顺时针换面 + 车身旋转
+    # --- R1：闲置（BL发射已由键B在Face0接管）---
+    # 保留边沿更新，不做任何操作
+
+    # --- L1 上升沿 → 顺时针换面 + BL强制停 + DC1保持 ---
+    if cur_L1 and not last_L1:
+        # 🚨 离开当前面时，强制停止无刷电机（安全）
+        if bl1_on or bl2_on:
+            power_expand_board.stop("BL1")
+            power_expand_board.stop("BL2")
+            bl1_on = False
+            bl2_on = False
+            print(">>> 换面: BL1/BL2 强制停止")
+        # ✅ DC1 收球状态保持不动（全局状态）
+
         face = (face + 1) % 3           # 顺时针切换面: 0→1→2→0
         print(">>> 面切换触发: %s（顺时针旋转120°）" % FACE_NAMES[face])
         face_rotate_start()             # 启动 PID 闭环旋转
-        # 跳过本轮摇杆处理，下一循环进入 face_rotating 分支
         last_L1 = cur_L1
         last_R1 = cur_R1
         time.sleep(LOOP_DELAY)
         continue
 
-    if cur_Plus and not last_Plus:      # + 上升沿 → 启动自动程序
+    # --- + 键 → 自动程序 ---
+    if cur_Plus and not last_Plus:
         auto_mode = True
         auto_step = 0
         auto_step_start = novapi.timer()
-        # 进入自动模式时机器人通常是静止的，插值起点清零
         auto_prev_Vx = 0.0
         auto_prev_Vy = 0.0
         auto_prev_omega = 0.0
-        # 清除编码器标定旧数据 + 重置编码器步状态
         _debug_cal_done = False
         _enc_cal_auto_started = False
         _enc_step_initialized = -1
         _cal_delta_M1 = _cal_delta_M2 = _cal_delta_M3 = None
-        # 安全打印第一步信息
         step0 = AUTO_SEQUENCE[0]
         if isinstance(step0[0], str):
-            print(">>> 自动程序启动！步骤 1/%d: %s" %
-                  (len(AUTO_SEQUENCE), step0[0]))
+            print(">>> 自动程序启动！步骤 1/%d: %s" % (len(AUTO_SEQUENCE), step0[0]))
         else:
             dur0, Vx0, Vy0, w0 = step0
             print(">>> 自动程序启动！步骤 1/%d: Vx=%d Vy=%d ω=%d (%.1fs)" %
                   (len(AUTO_SEQUENCE), Vx0, Vy0, w0, dur0))
-    # N1/N2/N3：编码器标定后查看增量（LED 显示 E####，优先于其他功能）
+
+    # --- 编码器标定后 N1/N2/N3 查看增量（仅print）---
     if _debug_cal_done:
         if cur_N1 and not last_N1:
-            __led.show("E%d" % _cal_delta_M1)
             print(">>> M1 编码增量: %d" % _cal_delta_M1)
         if cur_N2 and not last_N2:
-            __led.show("E%d" % _cal_delta_M2)
             print(">>> M2 编码增量: %d" % _cal_delta_M2)
         if cur_N3 and not last_N3:
-            __led.show("E%d" % _cal_delta_M3)
             print(">>> M3 编码增量: %d" % _cal_delta_M3)
-    else:
-        # 非标定状态：N2 → M4 收球编码电机切换（+100转 / 停）
-        if cur_N2 and not last_N2:
-            m4_collector_on = not m4_collector_on
-            if m4_collector_on:
-                __motor_M4.set_power(M4_COLLECTOR_SPEED)
-                print(">>> M4收球: 开 (+%d)" % M4_COLLECTOR_SPEED)
-                __led.show("M4on")
+
+    # --- 键A (N2)：面映射分发 ---
+    if cur_N2 and not last_N2 and not _debug_cal_done:
+        if face == 0:
+            # Face 0：DC1 收球开关
+            collector_on = not collector_on
+            if collector_on:
+                power_expand_board.set_power(DC_COLLECTOR_PORT, DC_COLLECTOR_SPEED)
+                print(">>> 键A(N2): DC1收球 开")
             else:
-                __motor_M4.set_power(0)
-                print(">>> M4收球: 关")
-                __led.show("M4of")
+                power_expand_board.set_power(DC_COLLECTOR_PORT, 0)
+                print(">>> 键A(N2): DC1收球 关")
+        elif cur_motor_idx is not None:
+            # Face 1/2：升降档位切一圈 L0→L1→L2→L0
+            lift_gear[cur_motor_idx] = (lift_gear[cur_motor_idx] + 1) % len(DEBUG_LIFT_GEARS)
+            target_deg = DEBUG_LIFT_GEARS[lift_gear[cur_motor_idx]]
+            lift_pid_start(cur_motor_idx, target_deg)
+            arm = "M5" if cur_motor_idx == 1 else "M4"
+            print(">>> 键A(N2): %s → %s (%d°)" % (arm, DEBUG_LIFT_NAMES[lift_gear[cur_motor_idx]], target_deg))
 
-    if cur_N1 and not last_N1:          # N1 上升沿 → DC1 收球开关翻转
-        collector_on = not collector_on
-        if collector_on:
-            power_expand_board.set_power(DC_COLLECTOR_PORT, DC_COLLECTOR_SPEED)
-            print(">>> 收球电机: 开 (正转 %d)" % DC_COLLECTOR_SPEED)
-        else:
-            power_expand_board.set_power(DC_COLLECTOR_PORT, 0)
-            print(">>> 收球电机: 关")
+    # --- 键B (R2)：面映射分发 ---
+    if cur_R2 and not last_R2 and not _debug_cal_done:
+        if face == 0:
+            # Face 0：BL1+BL2 发射开关
+            bl1_on = not bl1_on
+            bl2_on = not bl2_on
+            if bl1_on:
+                power_expand_board.set_power("BL1", BL_ACTION_SPEED)
+                power_expand_board.set_power("BL2", BL_ACTION_SPEED)
+                print(">>> 键B(R2): 双无刷启动 @%d" % BL_ACTION_SPEED)
+            else:
+                power_expand_board.stop("BL1")
+                power_expand_board.stop("BL2")
+                print(">>> 键B(R2): 双无刷停止")
+        elif cur_servo_idx is not None:
+            # Face 1/2：自适应夹爪
+            _grip_active[cur_servo_idx] = not _grip_active[cur_servo_idx]
+            sv = [__servo_1, __servo_2][cur_servo_idx]
+            sv_name = "SV1" if cur_servo_idx == 0 else "SV2"
+            if _grip_active[cur_servo_idx]:
+                _grip_closing[cur_servo_idx] = True
+                _grip_hold[cur_servo_idx] = False
+                _grip_start_time[cur_servo_idx] = novapi.timer()
+                _grip_settled[cur_servo_idx] = False
+                _grip_last_print[cur_servo_idx] = 0.0
+                if _HAS_SERVO:
+                    try:
+                        sv.set_power(GRIP_CLOSE_POWER)
+                    except Exception:
+                        pass
+                print(">>> 键B(R2): %s 夹紧启动" % sv_name)
+            else:
+                _grip_closing[cur_servo_idx] = False
+                _grip_hold[cur_servo_idx] = False
+                if _HAS_SERVO:
+                    try:
+                        sv.set_power(0)
+                        sv.move_to(0, 30)
+                    except Exception:
+                        pass
+                print(">>> 键B(R2): %s 释放 → 0°" % sv_name)
 
-    # --- R2：自适应夹爪（二号臂舵机 M6-INDEX2）---
-    # 按一下→缓慢夹紧直到夹到东西；再按→释放回全开位
-    if cur_R2 and not last_R2:
-        adaptive_grip_active = not adaptive_grip_active
-        if adaptive_grip_active:
-            adaptive_grip_closing = True
-            adaptive_grip_hold = False
-            _grip_start_time = novapi.timer()
-            _grip_settled = False
-            _grip_last_print = 0.0
-            if _HAS_SERVO:
-                try:
-                    __servo_2.set_power(GRIP_CLOSE_POWER)
-                except Exception:
-                    pass
-            print(">>> 自适应夹爪: 启动 → %.1fs后开始监测..." % GRIP_SETTLE_TIME)
-            __led.show("GRP")
-        else:
-            adaptive_grip_closing = False
-            adaptive_grip_hold = False
-            if _HAS_SERVO:
-                try:
-                    __servo_2.set_power(0)
-                    __servo_2.move_to(0, 30)
-                except Exception:
-                    pass
-            print(">>> 自适应夹爪: 释放 → 回全开位 0°")
-            __led.show("OPn")
+    # --- D-pad ↑↓：Face0=BL调速, Face1/2=升降档位 ---
+    if cur_Dpad_Up and not last_Dpad_Up_norm and not _debug_cal_done:
+        if face == 0:
+            BL_ACTION_SPEED = min(100, BL_ACTION_SPEED + 5)
+            if bl1_on:
+                power_expand_board.set_power("BL1", BL_ACTION_SPEED)
+                power_expand_board.set_power("BL2", BL_ACTION_SPEED)
+            print(">>> D-pad↑: 无刷速度 = %d" % BL_ACTION_SPEED)
+        elif cur_motor_idx is not None:
+            lift_gear[cur_motor_idx] = (lift_gear[cur_motor_idx] + 1) % len(DEBUG_LIFT_GEARS)
+            target_deg = DEBUG_LIFT_GEARS[lift_gear[cur_motor_idx]]
+            lift_pid_start(cur_motor_idx, target_deg)
+            arm = "M5" if cur_motor_idx == 1 else "M4"
+            print(">>> D-pad↑: %s → %s (%d°)" % (arm, DEBUG_LIFT_NAMES[lift_gear[cur_motor_idx]], target_deg))
+    if cur_Dpad_Down and not last_Dpad_Down_norm and not _debug_cal_done:
+        if face == 0:
+            BL_ACTION_SPEED = max(10, BL_ACTION_SPEED - 5)
+            if bl1_on:
+                power_expand_board.set_power("BL1", BL_ACTION_SPEED)
+                power_expand_board.set_power("BL2", BL_ACTION_SPEED)
+            print(">>> D-pad↓: 无刷速度 = %d" % BL_ACTION_SPEED)
+        elif cur_motor_idx is not None:
+            lift_gear[cur_motor_idx] = (lift_gear[cur_motor_idx] - 1) % len(DEBUG_LIFT_GEARS)
+            target_deg = DEBUG_LIFT_GEARS[lift_gear[cur_motor_idx]]
+            lift_pid_start(cur_motor_idx, target_deg)
+            arm = "M5" if cur_motor_idx == 1 else "M4"
+            print(">>> D-pad↓: %s → %s (%d°)" % (arm, DEBUG_LIFT_NAMES[lift_gear[cur_motor_idx]], target_deg))
 
-    # --- 升降臂档位控制（M5 二号臂，PID + 到位停电）---
-    # D-pad ↑/↓：切换升降档位 L0↔L1↔L2
-    if cur_Dpad_Up and not last_Dpad_Up_norm:
-        lift_gear = (lift_gear + 1) % len(DEBUG_LIFT_GEARS)
-        target_deg = DEBUG_LIFT_GEARS[lift_gear]
-        lift_pid_start(target_deg)
-        __led.show(DEBUG_LIFT_NAMES[lift_gear])
-        print(">>> 升降臂: D-pad↑ → %s (%d°)" % (DEBUG_LIFT_NAMES[lift_gear], target_deg))
-    if cur_Dpad_Down and not last_Dpad_Down_norm:
-        lift_gear = (lift_gear - 1) % len(DEBUG_LIFT_GEARS)
-        target_deg = DEBUG_LIFT_GEARS[lift_gear]
-        lift_pid_start(target_deg)
-        __led.show(DEBUG_LIFT_NAMES[lift_gear])
-        print(">>> 升降臂: D-pad↓ → %s (%d°)" % (DEBUG_LIFT_NAMES[lift_gear], target_deg))
+    # --- D-pad ←→：置空（原BL调速已移至↑↓在Face0）---
+    # 保留边沿更新，无实际操作
 
-    # N3：升降臂回零档 L0
-    if cur_N3 and not last_N3:
-        lift_gear = 0
-        lift_pid_start(0)
-        __led.show("L0")
-        print(">>> 升降臂: N3 → 回零档 L0")
+    # --- N3：升降臂回零（Face 1/2）---
+    if cur_N3 and not last_N3 and not _debug_cal_done:
+        if cur_motor_idx is not None:
+            lift_gear[cur_motor_idx] = 0
+            lift_pid_start(cur_motor_idx, 0)
+            arm = "M5" if cur_motor_idx == 1 else "M4"
+            print(">>> N3: %s → 回零档 L0" % arm)
+
+    # N1：闲置（原DC1收球已由键A接管）
+    # N4：闲置
 
     last_R1 = cur_R1
     last_R2 = cur_R2
+    last_L2 = cur_L2
     last_L1 = cur_L1
     last_Plus = cur_Plus
     last_Menu = cur_Menu
@@ -1853,49 +1979,50 @@ while True:
     last_N4 = cur_N4
     last_Dpad_Up_norm = cur_Dpad_Up
     last_Dpad_Down_norm = cur_Dpad_Down
+    last_Dpad_Left_norm = cur_Dpad_Left
+    last_Dpad_Right_norm = cur_Dpad_Right
 
-    # --- 升降臂 PID 每帧更新（到位后自动停电）---
-    lift_pid_tick()
+    # --- 升降臂 PID 每帧更新（双臂同时，各自独立到位停电，仅在活跃时运行）---
+    if _lift_pid_active[0] or _lift_pid_active[1]:
+        lift_pid_tick_all()
 
-    # --- 自适应夹爪每帧监测（角度限位 > 速度堵转检测）---
-    if adaptive_grip_closing and _HAS_SERVO:
-        try:
-            angle = __servo_2.get_value("angle")
-            speed = __servo_2.get_value("speed")
-            now = novapi.timer()
-            elapsed = now - _grip_start_time
+    # --- 自适应夹爪每帧监测（双舵机独立检测，仅在夹紧中运行）---
+    if _grip_closing[0] or _grip_closing[1]:
+        for sv_idx in range(2):
+            if not _grip_closing[sv_idx] or not _HAS_SERVO:
+                continue
+            try:
+                sv = [__servo_1, __servo_2][sv_idx]
+                angle = sv.get_value("angle")
+                speed = sv.get_value("speed")
+                now = novapi.timer()
+                elapsed = now - _grip_start_time[sv_idx]
+                sv_name = "SV1" if sv_idx == 0 else "SV2"
 
-            # 🚨 第一优先级：角度硬限位（机械极限保护，无论如何不能超）
-            if abs(angle) >= SERVO_MAX_ANGLE:
-                __servo_2.set_power(0)
-                adaptive_grip_closing = False
-                print(">>> 🚨 自适应夹爪: 到达机械极限 %d°！强制停电" % SERVO_MAX_ANGLE)
-                __led.show("LIM")
-
-            # 启动延迟：让电机先转起来再开始速度检测
-            elif not _grip_settled:
-                if elapsed >= GRIP_SETTLE_TIME:
-                    _grip_settled = True
-                    print(">>> 自适应夹爪: 开始监测 (当前速度=%.1f rpm, 角度=%.0f°)" % (speed, abs(angle)))
-            else:
-                if now - _grip_last_print >= 0.5:
-                    _grip_last_print = now
-                    print(">>> 速度:%.1f rpm 角度:%.0f° (堵转阈值=%.1f)" % (abs(speed), abs(angle), GRIP_SPEED_THRESHOLD))
-
-                # 速度归零=堵转 → 夹到东西
-                if abs(speed) < GRIP_SPEED_THRESHOLD:
-                    __servo_2.set_power(0)
-                    adaptive_grip_closing = False
-                    adaptive_grip_hold = True
-                    print(">>> 自适应夹爪: 夹到！速度=%.1f rpm (角度=%.0f°)" % (abs(speed), abs(angle)))
-                    __led.show("Hld")
-                elif elapsed > GRIP_TIMEOUT:
-                    __servo_2.set_power(0)
-                    adaptive_grip_closing = False
-                    print(">>> 自适应夹爪: 超时停止（%.1fs）" % GRIP_TIMEOUT)
-                    __led.show("tOut")
-        except Exception:
-            pass
+                # 🚨 角度硬限位
+                if abs(angle) >= SERVO_MAX_ANGLE:
+                    sv.set_power(0)
+                    _grip_closing[sv_idx] = False
+                    print(">>> 🚨 %s: 到达机械极限 %d°！强制停电" % (sv_name, SERVO_MAX_ANGLE))
+                elif not _grip_settled[sv_idx]:
+                    if elapsed >= GRIP_SETTLE_TIME:
+                        _grip_settled[sv_idx] = True
+                        print(">>> %s: 开始监测 (速度=%.1f rpm, 角度=%.0f°)" % (sv_name, speed, abs(angle)))
+                else:
+                    if now - _grip_last_print[sv_idx] >= 0.5:
+                        _grip_last_print[sv_idx] = now
+                        print(">>> %s: 速度%.1f rpm 角度%.0f°" % (sv_name, abs(speed), abs(angle)))
+                    if abs(speed) < GRIP_SPEED_THRESHOLD:
+                        sv.set_power(0)
+                        _grip_closing[sv_idx] = False
+                        _grip_hold[sv_idx] = True
+                        print(">>> %s: 夹到！速度=%.1f rpm (角度=%.0f°)" % (sv_name, abs(speed), abs(angle)))
+                    elif elapsed > GRIP_TIMEOUT:
+                        sv.set_power(0)
+                        _grip_closing[sv_idx] = False
+                        print(">>> %s: 超时停止（%.1fs）" % (sv_name, GRIP_TIMEOUT))
+            except Exception:
+                pass
 
     # --- 3. 死区过滤 ---
     Lx = apply_dead_zone(Lx)
@@ -1928,12 +2055,8 @@ while True:
     __motor_M2.set_power(M2_power)
     __motor_M3.set_power(M3_power)
 
-    # --- 10. LED 显示（面切换完成后显示面名称，否则显示当前面）---
-    now = novapi.timer()
-    if face_show_until > 0 and now < face_show_until:
-        pass  # 保持 face_rotate_tick 设置的 "F0"/"F1"/"F2"
-    else:
-        face_show_until = 0.0
+    # --- 10. LED 显示：始终显示当前无刷电机速度 ---
+    __led.show("S%d" % BL_ACTION_SPEED)
 
     # --- 11. 循环延时 ---
     time.sleep(LOOP_DELAY)

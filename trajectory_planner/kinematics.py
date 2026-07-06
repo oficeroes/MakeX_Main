@@ -207,7 +207,6 @@ def _speed_at_position(dist_from_start, total_len,
 def build_encoder_sequence(points, base_power, base_speed_cm_s=BASE_SPEED_CM_PER_SEC,
                            ticks_per_cm=ENCODER_TICKS_PER_CM,
                            invert_x=False, invert_y=False,
-                           drift_left_omega=0, drift_right_omega=0,
                            accel_cm=None, decel_cm=None,
                            min_speed=None, max_speed=None,
                            curve_adaptive=True):
@@ -216,6 +215,9 @@ def build_encoder_sequence(points, base_power, base_speed_cm_s=BASE_SPEED_CM_PER
     加速段→匀速段→减速段。加速/减速距离按路径总长自适应：
       - 长路径：使用用户设定的 accel_cm / decel_cm
       - 短路径：自动缩小，确保至少 30% 路径为匀速段
+
+    前后重量补偿在机器人端 mecánum_kinematics() 中处理（FRONT_BACK_COMPENSATION），
+    GUI 只负责把补偿值写入机器人源文件，不参与序列生成。
     """
     if len(points) < 2:
         return []
@@ -275,28 +277,121 @@ def build_encoder_sequence(points, base_power, base_speed_cm_s=BASE_SPEED_CM_PER
         vy = seg_power * uy
         vx, vy, _ = _scale_vector_to_power(vx, vy, seg_power)
 
-        # 漂移补偿
-        w_comp = 0.0
-        if abs(vx) > 1e-6 and (drift_left_omega or drift_right_omega):
-            strength = min(1.0, abs(vx) / max(1, power))
-            if vx < 0:
-                w_comp = drift_left_omega * strength
-            else:
-                w_comp = drift_right_omega * strength
-
         if invert_x: vx = -vx
         if invert_y: vy = -vy
-        if invert_x ^ invert_y: w_comp = -w_comp
 
         ticks = int(round(seg_len * ticks_per_cm))
         vy_power = int(round(vy))
+        vx_power = int(round(vx))
         if ticks > 0:
-            seq.append(('enc_move', ticks, vy_power, 0))
+            seq.append(('enc_move', ticks, vy_power, vx_power))
 
         cum_dist += seg_len
 
     seq.append(('enc_stop', 0, 0, 0))
     return seq
+
+
+def _enc_step_tag(step):
+    return step[0] if step and isinstance(step[0], str) else None
+
+
+def _merge_weighted_enc_step(a, b):
+    tag = _enc_step_tag(a)
+    total_ticks = int(a[1] + b[1])
+    if total_ticks <= 0:
+        return tuple(a)
+
+    if tag == 'enc_move':
+        vy = int(round((a[2] * a[1] + b[2] * b[1]) / total_ticks))
+        vx = int(round((a[3] * a[1] + b[3] * b[1]) / total_ticks))
+        return ('enc_move', total_ticks, vy, vx)
+
+    power = int(round((a[3] * a[1] + b[3] * b[1]) / total_ticks))
+    return ('enc_rot', total_ticks, 0, power)
+
+
+def _can_merge_enc_steps(a, b, power_ratio):
+    tag = _enc_step_tag(a)
+    if tag != _enc_step_tag(b) or tag not in ('enc_move', 'enc_rot'):
+        return False
+
+    if tag == 'enc_rot':
+        ap = a[3]
+        bp = b[3]
+        if abs(ap) < 1 or abs(bp) < 1:
+            return False
+        same_sign = (ap >= 0 and bp >= 0) or (ap <= 0 and bp <= 0)
+        if not same_sign:
+            return False
+        ratio = abs(bp - ap) / max(abs(ap), abs(bp), 1)
+        return ratio <= power_ratio
+
+    # enc_move is a 2D translation vector: (Vy, Vx).  The old merge logic
+    # only kept Vy, so pure strafe became ('enc_move', ticks, 0, 0).
+    a_vy, a_vx = float(a[2]), float(a[3])
+    b_vy, b_vx = float(b[2]), float(b[3])
+    a_mag = math.hypot(a_vx, a_vy)
+    b_mag = math.hypot(b_vx, b_vy)
+    if a_mag < 1 or b_mag < 1:
+        return False
+
+    ratio = abs(b_mag - a_mag) / max(a_mag, b_mag, 1.0)
+    if ratio > power_ratio:
+        return False
+
+    dot = (a_vx * b_vx + a_vy * b_vy) / (a_mag * b_mag)
+    dot = max(-1.0, min(1.0, dot))
+    angle = math.degrees(math.acos(dot))
+    return angle <= MERGE_ANGLE_DEG
+
+
+def _merge_enc_sequence_v2(seq, min_ticks, power_ratio):
+    if len(seq) < 2:
+        return list(seq)
+
+    filtered = []
+    pending_small = None
+
+    for raw_step in seq:
+        step = tuple(raw_step)
+        tag = _enc_step_tag(step)
+
+        if tag in ('enc_move', 'enc_rot'):
+            if pending_small is not None:
+                if _can_merge_enc_steps(pending_small, step, power_ratio):
+                    step = _merge_weighted_enc_step(pending_small, step)
+                    pending_small = None
+                else:
+                    filtered.append(pending_small)
+                    pending_small = None
+
+            if step[1] < min_ticks:
+                pending_small = step
+            else:
+                filtered.append(step)
+            continue
+
+        if pending_small is not None:
+            filtered.append(pending_small)
+            pending_small = None
+        filtered.append(step)
+
+    if pending_small is not None:
+        filtered.append(pending_small)
+
+    if len(filtered) < 2:
+        return filtered
+
+    merged = [filtered[0]]
+    for step in filtered[1:]:
+        prev = merged[-1]
+        if _can_merge_enc_steps(prev, step, power_ratio):
+            merged[-1] = _merge_weighted_enc_step(prev, step)
+        else:
+            merged.append(step)
+
+    return merged
 
 
 def build_encoder_sequence_heading(points, base_power, omega_power,
@@ -399,6 +494,8 @@ def merge_enc_sequence(seq, min_ticks=MIN_ENC_STEP_TICKS,
 
     返回合并后的序列
     """
+    return _merge_enc_sequence_v2(seq, min_ticks, power_ratio)
+
     if len(seq) < 2:
         return list(seq)
 
@@ -701,22 +798,20 @@ def apply_velocity_ramp(seq, ramp_time=0.25, ramp_steps=5, min_ratio=0.15):
 
 def build_sequence(points, mode, cm_per_s_at_p50, deg_per_s_at_omega50,
                    auto_power, omega_power, invert_x=False, invert_y=False,
-                   drift_left_omega=0, drift_right_omega=0, add_stop=True,
+                   add_stop=True,
                    ramp_enabled=True, ramp_time=0.25, ramp_steps=5,
                    ramp_min_ratio=0.15):
-    """完整管线：模式分发 → 合并 → 漂移补偿（GUI 视角）→ 反转 →
-       缓升缓降 → 格式化 → 停止缓冲
+    """完整管线：模式分发 → 合并 → 反转 → 缓升缓降 → 格式化 → 停止缓冲
 
     add_stop=False 时不追加 STOP_BUFFER，用于多段合并时每段单独生成。
-    补偿在反转之前做。这样无论 invert_x/y 怎么设，drift_left_omega 始终对应
-    "你画图时往左的那个方向"的补偿，所见即所得。
 
     反转一个轴等于镜像，所以 invert_x 或 invert_y 任一为真都要把 omega 同时取反，
-    否则模式 B 车头会反转、补偿 omega 也会颠倒。两者同时为真则等于绕原点 180°
-    旋转，omega 不变。
+    否则模式 B 车头会反转。两者同时为真则等于绕原点 180° 旋转，omega 不变。
 
     缓升缓降在每个路段的首尾插入功率渐变子步骤，防止高功率起步打滑。
     ramp_enabled=False 或 ramp_time=0 时跳过。
+
+    前后重量补偿在机器人端 mecánum_kinematics() 中处理，不参与序列生成。
     """
     if mode == MODE_TRANSLATION:
         raw = path_to_sequence_translation(points, cm_per_s_at_p50, auto_power)
@@ -729,21 +824,7 @@ def build_sequence(points, mode, cm_per_s_at_p50, deg_per_s_at_omega50,
 
     merged = merge_collinear(raw)
 
-    # 1) 左右平移漂移补偿：在 GUI 视角下，Vx<0 加左补偿，Vx>0 加右补偿
-    #    强度按 |Vx|/auto_power 线性缩放（斜走时按比例补偿）
-    if drift_left_omega or drift_right_omega:
-        compensated = []
-        for dur, vx, vy, w in merged:
-            if abs(vx) > 1e-6:
-                strength = min(1.0, abs(vx) / max(1, auto_power))
-                if vx < 0:
-                    w = w + drift_left_omega * strength
-                else:
-                    w = w + drift_right_omega * strength
-            compensated.append((dur, vx, vy, w))
-        merged = compensated
-
-    # 2) 反转 X / Y（机器人装反时使用）。镜像一次 → omega 取反
+    # 1) 反转 X / Y（机器人装反时使用）。镜像一次 → omega 取反
     omega_flip = -1 if (invert_x ^ invert_y) else 1
     if invert_x or invert_y or omega_flip == -1:
         flipped = []
@@ -756,7 +837,7 @@ def build_sequence(points, mode, cm_per_s_at_p50, deg_per_s_at_omega50,
             flipped.append((dur, vx, vy, w))
         merged = flipped
 
-    # 3) 缓升缓降：每段首尾插入功率渐变子步骤
+    # 2) 缓升缓降：每段首尾插入功率渐变子步骤
     if ramp_enabled and ramp_time > 0:
         merged = apply_velocity_ramp(merged, ramp_time, ramp_steps, ramp_min_ratio)
 

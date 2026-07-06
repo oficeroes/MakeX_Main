@@ -58,7 +58,8 @@ ENCODER_PULSES_PER_CM = None      # 1 cm = 多少编码脉冲（PPR / 周长，�
 # ===== 闭环控制参数（编码器 PID） =====
 # 编码器 → 距离换算：1 cm = 多少 encoder ticks（get_count() 返回值）
 # 用户自行标定后填入，填了才启用闭环模式
-ENCODER_TICKS_PER_CM = 18.0       # 默认值（约 1000°/58cm ≈ 17.2°，用 get_count 的 tick 单位）
+ENCODER_TICKS_PER_CM = 18.0       # 默认值（约 1000°/58cm ≈ 17.2°，用 get_value("angle") 的度/cm）
+DEFAULT_DISTANCE_SCALE = 1.0      # 导出距离倍率；实车偏小可临时调大，标定后应回到 1.0
 
 # PID 控制器增益
 PID_KP = 0.35                     # 比例系数：位置误差 → 功率修正
@@ -74,8 +75,8 @@ PROFILE_DEADBAND_TICKS = 8        # 到位死区（ticks），小于此值视为
 # ===== 速度曲线参数（用户可调） =====
 # 整个路径分为三段：加速段 → 匀速段 → 减速段
 # 加速段和减速段按"距离"定义（cm），而非时间，确保物理一致性
-PROFILE_ACCEL_CM = 8.0            # 路径开头多少 cm 用于加速（0=禁用）
-PROFILE_DECEL_CM = 8.0            # 路径结尾多少 cm 用于减速（0=禁用）
+PROFILE_ACCEL_CM = 0.0            # 路径开头多少 cm 用于加速（0=禁用）
+PROFILE_DECEL_CM = 0.0            # 路径结尾多少 cm 用于减速（0=禁用）
 PROFILE_MAX_SPEED = 100.0         # 匀速段最高速度（cm/s）
 PROFILE_MIN_SPEED = 30.0          # 加速起点 / 减速终点的最低速度（cm/s），克服静摩擦
 PROFILE_ROT_SPEED = 150.0         # 旋转最高角速度（°/s）
@@ -125,17 +126,26 @@ STOP_BUFFER = (0.1, 0, 0, 0)   # 自动序列末尾的停止缓冲
 DEFAULT_RAMP_TIME = 0.25       # 每段加速 / 减速各占多少秒（总过渡 = RAMP_TIME × 2）
 DEFAULT_RAMP_STEPS = 5         # 加速 / 减速各切成多少个子步骤（越多越平滑）
 DEFAULT_RAMP_MIN_RATIO = 0.15  # 起始 / 结束功率比例（0.15 = 15%，克服静摩擦最低值）
-RAMP_ENABLED = True            # 是否启用缓升缓降（导出时生效）
+RAMP_ENABLED = False           # 是否启用缓升缓降（导出时生效）
 
 # ===== 数据结构版本 =====
-SCHEMA_VERSION = 4  # v4: + chassis profile id
+SCHEMA_VERSION = 5  # v5: + field size controls and encoder distance scale
 
 # ===== 机器人执行端参数（导出时写入机器人代码顶部）=====
 DEFAULT_INVERT_X = False       # True = 所有 Vx 取反（左右装反）
 DEFAULT_INVERT_Y = False       # True = 所有 Vy 取反（前后装反）
-DEFAULT_RAMP_MS = 100          # 步间速度线性插值时长（毫秒），0=立即切换
-DEFAULT_DRIFT_LEFT_OMEGA = 0   # GUI 视角向左平移（Vx<0）的 omega 补偿
-DEFAULT_DRIFT_RIGHT_OMEGA = 0  # GUI 视角向右平移（Vx>0）的 omega 补偿
+DEFAULT_RAMP_MS = 0            # 步间速度线性插值时长（毫秒），0=立即切换
+# 前后重量补偿：尾重头轻 → 前轮加力（写入机器人 FRONT_BACK_COMPENSATION 常量）
+# 范围 0.0 ~ 0.50，0 = 不补偿，值越大前轮出力越多
+DEFAULT_FRONT_BACK_COMPENSATION = 0.0
+
+# 旋转均衡补偿：尾重导致旋转时前后出力不均（写入机器人 ROTATION_BALANCE）
+# 范围 0.0 ~ 0.50，0 = 不补偿，独立于前后补偿
+DEFAULT_ROTATION_BALANCE = 0.0
+
+# 平移纵向耦合补偿：平移时向前漂移 → 按 |Vx| 减 Vy（写入机器人 STRAFE_VY_COUPLING）
+# 范围 0.0 ~ 0.30，0 = 不补偿，值越大反向拉回越强
+DEFAULT_STRAFE_VY_COUPLING = 0.0
 
 # ===== 显示样式 =====
 GRID_SPACING_CM = 10.0

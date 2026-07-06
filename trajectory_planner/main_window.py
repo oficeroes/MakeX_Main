@@ -7,12 +7,12 @@ file_io / exporter）串联起来，处理用户交互并在它们之间传递�
 
 控件布局
 ========
-  工具栏（顶部）：新建 / 导入 / 保存 / 导出到机器人 / 标定测试段 / 加障碍物 / 删除选中 / 清空轨迹
+  工具栏（顶部）：新建 / 导入 / 保存 / 导出到机器人 / 加障碍物 / 删除选中 / 清空轨迹
   画布（中央）  ：FieldView（见 field_view.py）
   控制面板（右侧 QDockWidget）：
     ┌─ 底盘型号    QComboBox（从 CHASSIS_PROFILES 动态填充）
     ├─ 场地尺寸    宽 / 高（cm）
-    ├─ 速度标定    功率50时速度 / omega50时角速度
+    ├─ 标定        编码器比例 / 功率50时速度 / omega50时角速度
     ├─ 运动参数    移动功率 / 旋转功率 / 模式切换 / 反转 X / 反转 Y
     ├─ 速度过渡    AUTO_RAMP_MS（写入机器人）
     ├─ 漂移补偿    左移 omega 补偿 / 右移 omega 补偿
@@ -39,7 +39,7 @@ combo_chassis 的 userData 存 profile_id（字符串）。
 注意
 ====
 - _build_current_payload / _apply_payload 完整保存/恢复所有控件状态（含 chassis_profile_id）。
-- on_calibration_export 强制 ramp_ms=0，使标定测量结果不受插值干扰。
+- on_encoder_calibration_export 强制 ramp_ms=0，使标定测量结果不受插值干扰。
 - on_export 中 ROBOT_FILE（硬编码别名）已弃用，请始终通过 _current_profile().file_path。
 - 漂移补偿在 GUI 视角下有意义（不受反转影响），详见 kinematics.py 的注释。
 """
@@ -58,8 +58,9 @@ from .config import (
     DEFAULT_INVERT_X,
     DEFAULT_INVERT_Y,
     DEFAULT_RAMP_MS,
-    DEFAULT_DRIFT_LEFT_OMEGA,
-    DEFAULT_DRIFT_RIGHT_OMEGA,
+    DEFAULT_FRONT_BACK_COMPENSATION,
+    DEFAULT_ROTATION_BALANCE,
+    DEFAULT_STRAFE_VY_COUPLING,
     MODE_TRANSLATION,
     MODE_HEADING,
     POWER_MIN,
@@ -78,6 +79,7 @@ from .config import (
     BASE_SPEED_CM_PER_SEC,
     BASE_ROT_DEG_PER_SEC,
     ENCODER_TICKS_PER_CM,
+    DEFAULT_DISTANCE_SCALE,
     CURVE_SLOWDOWN_FACTOR,
     STRAIGHT_BOOST_FACTOR,
     PROFILE_ACCEL_CM,
@@ -304,6 +306,48 @@ class MainWindow(QtWidgets.QMainWindow):
         )
         outer.addWidget(self.lbl_chassis_desc)
 
+        # --- 场地实际尺寸 / 比例 ---
+        g_field = QtWidgets.QGroupBox("场地实际比例")
+        v_field = QtWidgets.QVBoxLayout(g_field)
+        f_field = QtWidgets.QFormLayout()
+
+        self.sp_field_w = QtWidgets.QDoubleSpinBox()
+        self.sp_field_w.setRange(50, 2000)
+        self.sp_field_w.setDecimals(1)
+        self.sp_field_w.setSuffix(" cm")
+        self.sp_field_w.setValue(DEFAULT_FIELD_WIDTH_CM)
+        self.sp_field_w.setToolTip("场地真实宽度。赛规场地为 465.5 cm")
+        f_field.addRow("场地宽:", self.sp_field_w)
+
+        self.sp_field_h = QtWidgets.QDoubleSpinBox()
+        self.sp_field_h.setRange(50, 2000)
+        self.sp_field_h.setDecimals(1)
+        self.sp_field_h.setSuffix(" cm")
+        self.sp_field_h.setValue(DEFAULT_FIELD_HEIGHT_CM)
+        self.sp_field_h.setToolTip("场地真实高度。赛规场地为 305.5 cm")
+        f_field.addRow("场地高:", self.sp_field_h)
+
+        v_field.addLayout(f_field)
+
+        field_btn_row = QtWidgets.QWidget()
+        field_btn_h = QtWidgets.QHBoxLayout(field_btn_row)
+        field_btn_h.setContentsMargins(0, 0, 0, 0)
+        field_btn_h.setSpacing(4)
+        btn_apply_field = QtWidgets.QPushButton("应用场地")
+        btn_apply_field.setToolTip("按输入尺寸重建画布网格和四角启动区")
+        btn_apply_field.clicked.connect(self.on_apply_field_size)
+        btn_reset_field = QtWidgets.QPushButton("赛规尺寸")
+        btn_reset_field.setToolTip("恢复 MakeX Challenge 465.5 × 305.5 cm 场地")
+        btn_reset_field.clicked.connect(self.on_reset_field_size)
+        field_btn_h.addWidget(btn_apply_field)
+        field_btn_h.addWidget(btn_reset_field)
+        v_field.addWidget(field_btn_row)
+
+        self.lbl_field_info = QtWidgets.QLabel("赛规：465.5 × 305.5 cm")
+        self.lbl_field_info.setStyleSheet("color: #777; font-size: 10px;")
+        v_field.addWidget(self.lbl_field_info)
+        outer.addWidget(g_field)
+
         # --- 运动参数（合并最重要的参数） ---
         g_motion = QtWidgets.QGroupBox("运动参数")
         f_motion = QtWidgets.QFormLayout(g_motion)
@@ -392,8 +436,8 @@ class MainWindow(QtWidgets.QMainWindow):
         ramp_h.setContentsMargins(0, 0, 0, 0); ramp_h.setSpacing(4)
         self.chk_ramp = QtWidgets.QCheckBox("缓升缓降")
         self.chk_ramp.setToolTip(
-            "在每个路段首尾插入功率渐变子步骤，避免高功率起步打滑。\n"
-            "勾选后导出时自动拆分每段为 加速→匀速→减速 三段")
+            "勾选后按上方加速/减速距离生成 加速→匀速→减速。\n"
+            "不勾选时按基础匀速导出。")
         self.chk_ramp.setChecked(RAMP_ENABLED)
         ramp_h.addWidget(self.chk_ramp)
         ramp_h.addStretch()
@@ -420,8 +464,8 @@ class MainWindow(QtWidgets.QMainWindow):
 
         outer.addWidget(g_motion)
 
-        # --- 速度标定 ---
-        g_cal = QtWidgets.QGroupBox("速度标定")
+        # --- 编码器标定 ---
+        g_cal = QtWidgets.QGroupBox("编码器标定")
         v_cal = QtWidgets.QVBoxLayout(g_cal)
         v_cal.setSpacing(6)
         f_cal = QtWidgets.QFormLayout()
@@ -441,12 +485,36 @@ class MainWindow(QtWidgets.QMainWindow):
         self.sp_deg_per_s.setToolTip("功率=50 时机器人实测自转角速度（°/s）。让机器人原地自转 360° 计时反算")
         f_cal.addRow("P50 旋转:", self.sp_deg_per_s)
 
+        self.sp_encoder_ticks_per_cm = QtWidgets.QDoubleSpinBox()
+        self.sp_encoder_ticks_per_cm.setRange(1, 200)
+        self.sp_encoder_ticks_per_cm.setDecimals(3)
+        self.sp_encoder_ticks_per_cm.setSingleStep(0.1)
+        self.sp_encoder_ticks_per_cm.setSuffix(" °/cm")
+        self.sp_encoder_ticks_per_cm.setValue(ENCODER_TICKS_PER_CM)
+        self.sp_encoder_ticks_per_cm.setToolTip(
+            "机器人实际每走 1 cm 需要的编码器角度。\n"
+            "用编码器标定自动计算；若实车偏小，通常是这里偏低。"
+        )
+        f_cal.addRow("编码器比例:", self.sp_encoder_ticks_per_cm)
+
+        self.sp_distance_scale = QtWidgets.QDoubleSpinBox()
+        self.sp_distance_scale.setRange(0.10, 5.00)
+        self.sp_distance_scale.setDecimals(3)
+        self.sp_distance_scale.setSingleStep(0.05)
+        self.sp_distance_scale.setSuffix(" ×")
+        self.sp_distance_scale.setValue(DEFAULT_DISTANCE_SCALE)
+        self.sp_distance_scale.setToolTip(
+            "临时导出距离倍率。画 100 cm 但实车只跑 80 cm，可填 1.25。\n"
+            "完成编码器标定后建议保持 1.000。"
+        )
+        f_cal.addRow("实车倍率:", self.sp_distance_scale)
+
         # 编码器 PPR
         self.sp_encoder_ppr = QtWidgets.QSpinBox()
         self.sp_encoder_ppr.setRange(0, 99999)
         self.sp_encoder_ppr.setSpecialValueText("未知")
         self.sp_encoder_ppr.setValue(0)
-        self.sp_encoder_ppr.setToolTip("编码器每转一圈的脉冲数（PPR）。通过下方「编码器标定」流程测出后填入")
+        self.sp_encoder_ppr.setToolTip("参考值：按轮周长反推的每轮编码器角度/圈。真正控制距离的是上方「编码器比例」")
         f_cal.addRow("编码器 PPR:", self.sp_encoder_ppr)
 
         v_cal.addLayout(f_cal)
@@ -455,14 +523,6 @@ class MainWindow(QtWidgets.QMainWindow):
         cal_btn_row = QtWidgets.QWidget()
         cal_btn_h = QtWidgets.QHBoxLayout(cal_btn_row)
         cal_btn_h.setContentsMargins(0, 0, 0, 0); cal_btn_h.setSpacing(4)
-
-        btn_speed_cal = QtWidgets.QPushButton("📏 速度标定")
-        btn_speed_cal.setToolTip(
-            "向机器人写入 1 秒直走测试段（含 0→50→0 加减速）。\n"
-            "烧录后按 + 键运行，用尺子量走了多少 cm，\n"
-            "填入上方「P50 直行」= 量得距离（cm）。")
-        btn_speed_cal.clicked.connect(self.on_calibration_export)
-        cal_btn_h.addWidget(btn_speed_cal)
 
         btn_enc_cal = QtWidgets.QPushButton("🔢 编码器标定")
         btn_enc_cal.setToolTip(
@@ -481,7 +541,7 @@ class MainWindow(QtWidgets.QMainWindow):
         btn_enter_result = QtWidgets.QPushButton("📥 录入标定结果")
         btn_enter_result.setToolTip(
             "从机器人 LED（N1-N4）读到编码器增量后，\n"
-            "在此输入实测距离 D 和增量值 → 自动计算 PPR 和 P50 直行速度。")
+            "在此输入实测距离 D 和增量值 → 自动计算编码器比例和 P50 直行速度。")
         btn_enter_result.clicked.connect(self.on_enter_calibration_results)
         cal_enter_h.addWidget(btn_enter_result)
         v_cal.addWidget(cal_enter_row)
@@ -515,29 +575,42 @@ class MainWindow(QtWidgets.QMainWindow):
         )
         f_adv.addRow("速度过渡:", self.sp_ramp_ms)
 
-        self.sp_drift_left = QtWidgets.QSpinBox()
-        self.sp_drift_left.setRange(-30, 30); self.sp_drift_left.setValue(DEFAULT_DRIFT_LEFT_OMEGA)
-        self.sp_drift_left.setToolTip(
-            "向左平移时机身往右偏 → 填正数（顺时针补偿）\n"
-            "向左平移时机身往左偏 → 填负数\n"
-            "建议 1~5 起调，强度按 |Vx|/power 自动缩放"
+        self.sp_front_back_comp = QtWidgets.QDoubleSpinBox()
+        self.sp_front_back_comp.setRange(0.0, 0.50)
+        self.sp_front_back_comp.setDecimals(2)
+        self.sp_front_back_comp.setSingleStep(0.02)
+        self.sp_front_back_comp.setValue(DEFAULT_FRONT_BACK_COMPENSATION)
+        self.sp_front_back_comp.setToolTip(
+            "尾重头轻补偿（仅影响 Vy 直走分量）：\n"
+            "前轮 Vy× (1+补偿)，后轮 Vy× (1−补偿)\n"
+            "0.00=不补偿  0.10=前+10%后-10%"
         )
-        self.sp_drift_right = QtWidgets.QSpinBox()
-        self.sp_drift_right.setRange(-30, 30); self.sp_drift_right.setValue(DEFAULT_DRIFT_RIGHT_OMEGA)
-        self.sp_drift_right.setToolTip(
-            "向右平移时机身往左偏 → 填负数\n"
-            "向右平移时机身往右偏 → 填正数\n"
-            "建议 1~5 起调，强度按 |Vx|/power 自动缩放"
+        f_adv.addRow("前后补偿:", self.sp_front_back_comp)
+
+        self.sp_rotation_balance = QtWidgets.QDoubleSpinBox()
+        self.sp_rotation_balance.setRange(0.0, 0.50)
+        self.sp_rotation_balance.setDecimals(2)
+        self.sp_rotation_balance.setSingleStep(0.02)
+        self.sp_rotation_balance.setValue(DEFAULT_ROTATION_BALANCE)
+        self.sp_rotation_balance.setToolTip(
+            "旋转均衡补偿（仅影响 omega 旋转分量）：\n"
+            "前轮 ω× (1+补偿)，后轮 ω× (1−补偿)\n"
+            "独立于前后补偿，因为旋转力学与直走不同\n"
+            "0.00=不补偿  右转偏 → 加大此值"
         )
-        # 两个漂移补偿放一行
-        drift_row = QtWidgets.QWidget()
-        drift_h = QtWidgets.QHBoxLayout(drift_row)
-        drift_h.setContentsMargins(0, 0, 0, 0); drift_h.setSpacing(4)
-        drift_h.addWidget(QtWidgets.QLabel("左"))
-        drift_h.addWidget(self.sp_drift_left)
-        drift_h.addWidget(QtWidgets.QLabel("右"))
-        drift_h.addWidget(self.sp_drift_right)
-        f_adv.addRow("漂移补偿:", drift_row)
+        f_adv.addRow("旋转均衡:", self.sp_rotation_balance)
+
+        self.sp_strafe_coupling = QtWidgets.QDoubleSpinBox()
+        self.sp_strafe_coupling.setRange(0.0, 0.30)
+        self.sp_strafe_coupling.setDecimals(2)
+        self.sp_strafe_coupling.setSingleStep(0.02)
+        self.sp_strafe_coupling.setValue(DEFAULT_STRAFE_VY_COUPLING)
+        self.sp_strafe_coupling.setToolTip(
+            "平移纵向漂移补偿：平移时因尾重向前漂移 → Vy = Vy − |Vx|×此值\n"
+            "仅当 |Vx|>|Vy| 时生效（主要在做平移），直走/斜走不受影响\n"
+            "0.00=不补偿  0.05=轻微拉回  0.15=强力拉回"
+        )
+        f_adv.addRow("平移耦合:", self.sp_strafe_coupling)
         outer.addWidget(g_adv)
 
         # --- 平滑参数 ---
@@ -692,6 +765,32 @@ class MainWindow(QtWidgets.QMainWindow):
         # 每段路径完成时推一个快照到撤销栈
         self.scene.path_finalized.connect(self._push_undo)
 
+    def _set_field_size(self, width_cm, height_cm, update_controls=True):
+        width_cm = float(width_cm)
+        height_cm = float(height_cm)
+        self.scene.set_field_size(width_cm, height_cm)
+        if update_controls:
+            self.sp_field_w.blockSignals(True)
+            self.sp_field_h.blockSignals(True)
+            self.sp_field_w.setValue(width_cm)
+            self.sp_field_h.setValue(height_cm)
+            self.sp_field_w.blockSignals(False)
+            self.sp_field_h.blockSignals(False)
+        self.lbl_field_info.setText("当前场地：%.1f × %.1f cm" % (width_cm, height_cm))
+        self.view.zoom_fit()
+
+    def on_apply_field_size(self):
+        self._push_undo()
+        self._set_field_size(self.sp_field_w.value(), self.sp_field_h.value(), update_controls=False)
+        self._lbl_status.setText(
+            "已应用场地尺寸：%.1f × %.1f cm" % (self.sp_field_w.value(), self.sp_field_h.value())
+        )
+
+    def on_reset_field_size(self):
+        self._push_undo()
+        self._set_field_size(DEFAULT_FIELD_WIDTH_CM, DEFAULT_FIELD_HEIGHT_CM)
+        self._lbl_status.setText("已恢复赛规场地尺寸：465.5 × 305.5 cm")
+
     # ---- 撤销 / 重做 ----
     def _push_undo(self, *_):
         """把当前状态快照压栈，清空重做栈"""
@@ -786,6 +885,12 @@ class MainWindow(QtWidgets.QMainWindow):
         profile_id = self.combo_chassis.currentData()
         return get_profile(profile_id)
 
+    def _encoder_ticks_per_cm(self):
+        return max(0.001, float(self.sp_encoder_ticks_per_cm.value()))
+
+    def _export_ticks_per_cm(self):
+        return self._encoder_ticks_per_cm() * max(0.001, float(self.sp_distance_scale.value()))
+
     def _sync_active_vehicle(self):
         """把工具栏选中的底盘同步到场景"""
         profile = self._current_profile()
@@ -848,7 +953,7 @@ class MainWindow(QtWidgets.QMainWindow):
         else:
             lines.append("1) 四轮麦克纳姆前后对称，无需切换正面")
         lines.append("2) 任何参数改了之后必须点「导出到机器人」才会生效")
-        lines.append("3) 漂移补偿是在 GUI 视角下：勾不勾反转都按你画图时的左右")
+        lines.append("3) 前后补偿会写入机器人 FRONT_BACK_COMPENSATION 常量，手动/自动均生效")
         lines.append("4) 导出目标文件: %s" % profile.file_path.name)
         self.lbl_face.setText("提示：\n" + "\n".join(lines))
 
@@ -997,6 +1102,10 @@ class MainWindow(QtWidgets.QMainWindow):
                 auto_power=self.sp_auto_power.value(),
                 ramp_ms=self.sp_ramp_ms.value(),
                 encoder_based=True,
+                encoder_ticks_per_cm=self._encoder_ticks_per_cm(),
+                front_back_compensation=self.sp_front_back_comp.value(),
+                rotation_balance=self.sp_rotation_balance.value(),
+                strafe_vy_coupling=self.sp_strafe_coupling.value(),
             )
         except Exception as e:
             QtWidgets.QMessageBox.critical(self, "导出失败", str(e))
@@ -1004,48 +1113,15 @@ class MainWindow(QtWidgets.QMainWindow):
         QtWidgets.QMessageBox.information(
             self, "导出成功",
             "已写入 %s\n编码器闭环模式 | 共 %d 步\n"
-            "速度曲线: %.0f→%.0f→%.0f cm/s | 加速 %.0fcm 减速 %.0fcm\n备份: %s" % (
+            "匀速目标: %.0f cm/s | 编码器 %.3f °/cm | 实车倍率 %.3f×\n"
+            "加速 %.0fcm 减速 %.0fcm\n备份: %s" % (
                 profile.file_path.name, len(sequence),
-                self.sp_min_speed.value(), self.sp_max_speed.value(), self.sp_min_speed.value(),
-                self.sp_accel_cm.value(), self.sp_decel_cm.value(),
+                self.sp_max_speed.value(), self._encoder_ticks_per_cm(), self.sp_distance_scale.value(),
+                self.sp_accel_cm.value() if self.chk_ramp.isChecked() else 0.0,
+                self.sp_decel_cm.value() if self.chk_ramp.isChecked() else 0.0,
                 backup.name),
         )
         self._lbl_status.setText("导出完成 — %d 步 → %s" % (len(sequence), profile.file_path.name))
-
-    def on_calibration_export(self):
-        """生成 1 秒前进的速度标定测试段（短距离，有加速度渐变防打滑）"""
-        profile = self._current_profile()
-        if not self._confirm(
-            "速度标定 — 向 %s 写入：\n"
-            "  P50 直行 1 秒（含 0→50→0 加减速防打滑）\n\n"
-            "流程：\n"
-            "  ① 烧录，地上画起跑线\n"
-            "  ② 按 + 键运行（约走 20~40 cm）\n"
-            "  ③ 用尺子量实际走的距离 D（cm）\n"
-            "  ④ 在右侧面板「P50 直行」填入 D\n\n"
-            "确认写入？" % profile.file_path.name
-        ):
-            return
-        seq = [(1.0, 0, 50, 0), STOP_BUFFER]
-        try:
-            backup, _ = write_auto_sequence(
-                seq, robot_file=profile.file_path,
-                source_name="(speed calibration)",
-                mode="translation",
-                cm_per_s_at_p50=self.sp_cm_per_s.value(),
-                auto_power=50,
-                ramp_ms=0,
-            )
-        except Exception as e:
-            QtWidgets.QMessageBox.critical(self, "写入失败", str(e))
-            return
-        QtWidgets.QMessageBox.information(
-            self, "速度标定写入成功",
-            "已写入 %s\n（备份：%s）\n\n"
-            "烧录后按 + 键运行，量距离 D（cm）\n"
-            "→ 在面板「P50 直行」填入 D（走了 1 秒，所以 D = cm/s）"
-            % (profile.file_path.name, backup.name),
-        )
 
     def on_encoder_calibration_export(self):
         """导出编码器标定脚本：直走并将增量存入机器人 LED 可查询变量"""
@@ -1059,7 +1135,7 @@ class MainWindow(QtWidgets.QMainWindow):
             "  ② 按 + 键运行（约走 20~40 cm）\n"
             "  ③ 用尺子量距离 D（cm）\n"
             "  ④ 按 N1/N2/N3/N4 查看 LED 上的编码器增量（E####）\n"
-            "  ⑤ 回到 GUI 点「录入标定结果」，填入 D 和四轮增量，自动推算 PPR\n\n"
+            "  ⑤ 回到 GUI 点「录入标定结果」，填入 D 和四轮增量，自动推算 °/cm\n\n"
             "确认写入？" % profile.file_path.name
         ):
             return
@@ -1089,7 +1165,7 @@ class MainWindow(QtWidgets.QMainWindow):
         )
 
     def on_enter_calibration_results(self):
-        """弹出对话框，填入实测距离和四轮编码器增量，自动推算 PPR 和 P50 直行速度"""
+        """弹出对话框，填入实测距离和四轮编码器增量，自动推算 °/cm 和 P50 直行速度"""
         dlg = QtWidgets.QDialog(self)
         dlg.setWindowTitle("录入编码器标定结果")
         dlg.setMinimumWidth(340)
@@ -1127,6 +1203,7 @@ class MainWindow(QtWidgets.QMainWindow):
             return
 
         avg_delta = sum(valid_deltas) / len(valid_deltas)
+        deg_per_cm = avg_delta / D
         # 圈数 = 距离 / 轮周长；PPR = 增量 / 圈数
         wheel_circ = WHEEL_CIRCUMFERENCE_CM  # 31.4159 cm
         revs = D / wheel_circ
@@ -1135,17 +1212,21 @@ class MainWindow(QtWidgets.QMainWindow):
         cm_per_s = D
 
         self.sp_encoder_ppr.setValue(int(round(ppr_calc)))
+        self.sp_encoder_ticks_per_cm.setValue(round(deg_per_cm, 3))
+        self.sp_distance_scale.setValue(1.0)
         self.sp_cm_per_s.setValue(round(cm_per_s, 1))
 
         delta_str = "  ".join("M%d=%d" % (i + 1, deltas[i]) for i in range(4))
         self.lbl_cal_result.setText(
             "标定结果（D=%.1f cm）：\n"
             "%s\n"
-            "平均增量 %.0f → 推算 PPR=%.0f\n"
+            "平均增量 %.0f → 编码器比例 %.3f °/cm → 推算 PPR=%.0f\n"
             "P50 直行已更新为 %.1f cm/s"
-            % (D, delta_str, avg_delta, ppr_calc, cm_per_s)
+            % (D, delta_str, avg_delta, deg_per_cm, ppr_calc, cm_per_s)
         )
-        self._lbl_status.setText("标定结果已录入：PPR=%.0f，P50=%.1f cm/s" % (ppr_calc, cm_per_s))
+        self._lbl_status.setText(
+            "标定结果已录入：%.3f °/cm，P50=%.1f cm/s" % (deg_per_cm, cm_per_s)
+        )
 
     def on_add_obstacle(self):
         size = max(20.0, min(self.scene.field_size()) * 0.1)
@@ -1369,14 +1450,14 @@ class MainWindow(QtWidgets.QMainWindow):
         mode = self._current_mode()
         inv_x = self.chk_invert_x.isChecked()
         inv_y = self.chk_invert_y.isChecked()
-        drift_l = self.sp_drift_left.value()
-        drift_r = self.sp_drift_right.value()
-        accel_cm = self.sp_accel_cm.value()
-        decel_cm = self.sp_decel_cm.value()
+        ramp_on = self.chk_ramp.isChecked()
+        accel_cm = self.sp_accel_cm.value() if ramp_on else 0.0
+        decel_cm = self.sp_decel_cm.value() if ramp_on else 0.0
         max_spd = self.sp_max_speed.value()
         min_spd = self.sp_min_speed.value()
         rot_spd = self.sp_rot_speed.value()
         curve_on = self.chk_curve.isChecked()
+        ticks_per_cm = self._export_ticks_per_cm()
         current_vid = self._current_profile().profile_id
 
         for i, seg in enumerate(self.scene.path_segments):
@@ -1389,6 +1470,7 @@ class MainWindow(QtWidgets.QMainWindow):
                     seg_seq = build_encoder_sequence_heading(
                         seg.smoothed_points, auto_power, omega_power,
                         base_speed_cm_s=max_spd, base_rot_deg_s=rot_spd,
+                        ticks_per_cm=ticks_per_cm,
                         invert_x=inv_x, invert_y=inv_y,
                         accel_cm=accel_cm, decel_cm=decel_cm,
                         min_speed=min_spd, max_speed=max_spd,
@@ -1397,8 +1479,8 @@ class MainWindow(QtWidgets.QMainWindow):
                     seg_seq = build_encoder_sequence(
                         seg.smoothed_points, auto_power,
                         base_speed_cm_s=max_spd,
+                        ticks_per_cm=ticks_per_cm,
                         invert_x=inv_x, invert_y=inv_y,
-                        drift_left_omega=drift_l, drift_right_omega=drift_r,
                         accel_cm=accel_cm, decel_cm=decel_cm,
                         min_speed=min_spd, max_speed=max_spd,
                         curve_adaptive=curve_on,
@@ -1407,7 +1489,11 @@ class MainWindow(QtWidgets.QMainWindow):
                 seg_seq = merge_enc_sequence(seg_seq)
                 seq.extend(seg_seq)
             for block in self.scene.action_chains[i]:
-                seq.extend(block.to_sequence_steps(max_spd, auto_power))
+                seq.extend(block.to_sequence_steps(
+                    max_spd, auto_power,
+                    encoder_based=True,
+                    ticks_per_cm=ticks_per_cm,
+                ))
 
         # v5.2: 清理多余的 enc_stop — 只保留序列末尾的最后一个
         #        中间多余的 enc_stop 会打断多段路径的无缝衔接
@@ -1431,8 +1517,11 @@ class MainWindow(QtWidgets.QMainWindow):
             "deg_per_second_at_omega_50": self.sp_deg_per_s.value(),
             "auto_power": self.sp_auto_power.value(),
             "omega_power": self.sp_omega_power.value(),
-            "drift_left_omega": self.sp_drift_left.value(),
-            "drift_right_omega": self.sp_drift_right.value(),
+            "encoder_ticks_per_cm": self.sp_encoder_ticks_per_cm.value(),
+            "distance_scale": self.sp_distance_scale.value(),
+            "front_back_compensation": self.sp_front_back_comp.value(),
+            "rotation_balance": self.sp_rotation_balance.value(),
+            "strafe_vy_coupling": self.sp_strafe_coupling.value(),
         }
         settings = {
             "mode": self._current_mode(),
@@ -1472,14 +1561,22 @@ class MainWindow(QtWidgets.QMainWindow):
         )
 
     def _apply_payload(self, data):
-        # 场地尺寸固定 4655×3055mm，忽略 JSON 中的旧值
+        field = data.get("field", {})
+        self._set_field_size(
+            float(field.get("width_cm", DEFAULT_FIELD_WIDTH_CM)),
+            float(field.get("height_cm", DEFAULT_FIELD_HEIGHT_CM)),
+        )
+
         cal = data.get("calibration", {})
         self.sp_cm_per_s.setValue(float(cal.get("cm_per_second_at_power_50", DEFAULT_CM_PER_SEC_AT_P50)))
         self.sp_deg_per_s.setValue(float(cal.get("deg_per_second_at_omega_50", DEFAULT_DEG_PER_SEC_AT_OMEGA50)))
         self.sp_auto_power.setValue(int(cal.get("auto_power", DEFAULT_AUTO_POWER)))
         self.sp_omega_power.setValue(int(cal.get("omega_power", DEFAULT_OMEGA_POWER)))
-        self.sp_drift_left.setValue(int(cal.get("drift_left_omega", DEFAULT_DRIFT_LEFT_OMEGA)))
-        self.sp_drift_right.setValue(int(cal.get("drift_right_omega", DEFAULT_DRIFT_RIGHT_OMEGA)))
+        self.sp_encoder_ticks_per_cm.setValue(float(cal.get("encoder_ticks_per_cm", ENCODER_TICKS_PER_CM)))
+        self.sp_distance_scale.setValue(float(cal.get("distance_scale", DEFAULT_DISTANCE_SCALE)))
+        self.sp_front_back_comp.setValue(float(cal.get("front_back_compensation", DEFAULT_FRONT_BACK_COMPENSATION)))
+        self.sp_rotation_balance.setValue(float(cal.get("rotation_balance", DEFAULT_ROTATION_BALANCE)))
+        self.sp_strafe_coupling.setValue(float(cal.get("strafe_vy_coupling", DEFAULT_STRAFE_VY_COUPLING)))
 
         settings = data.get("settings", {})
         mode = settings.get("mode", MODE_TRANSLATION)
@@ -1548,22 +1645,37 @@ class MainWindow(QtWidgets.QMainWindow):
         ) == QtWidgets.QMessageBox.Yes
 
     def _confirm_export(self, sequence):
-        # 只统计标准运动步骤（4元组且第1元不是字符串）
-        motion_steps = [s for s in sequence if not isinstance(s[0], str)]
-        nonzero_omega = sum(1 for d, vx, vy, w in motion_steps if w != 0)
-        max_abs_omega = max((abs(w) for d, vx, vy, w in motion_steps), default=0)
-        action_steps = len(sequence) - len(motion_steps)
+        time_motion_steps = [s for s in sequence if not isinstance(s[0], str)]
+        enc_move_steps = [s for s in sequence if isinstance(s[0], str) and s[0] == "enc_move"]
+        enc_rot_steps = [s for s in sequence if isinstance(s[0], str) and s[0] == "enc_rot"]
+        motion_count = len(time_motion_steps) + len(enc_move_steps) + len(enc_rot_steps)
+        nonzero_omega = (
+            sum(1 for d, vx, vy, w in time_motion_steps if w != 0)
+            + len(enc_rot_steps)
+        )
+        max_abs_omega = max(
+            [abs(w) for d, vx, vy, w in time_motion_steps]
+            + [abs(s[3]) for s in enc_rot_steps],
+            default=0,
+        )
+        action_steps = len(sequence) - motion_count
 
         flags = []
         if self.chk_invert_x.isChecked():
             flags.append("反转 X 轴")
         if self.chk_invert_y.isChecked():
             flags.append("反转 Y 轴")
-        if self.sp_drift_left.value() or self.sp_drift_right.value():
-            flags.append("漂移补偿 L=%+d R=%+d" % (
-                self.sp_drift_left.value(), self.sp_drift_right.value()))
+        if self.sp_front_back_comp.value() > 0:
+            flags.append("前后补偿 %.2f" % self.sp_front_back_comp.value())
+        if self.sp_rotation_balance.value() > 0:
+            flags.append("旋转均衡 %.2f" % self.sp_rotation_balance.value())
+        if self.sp_strafe_coupling.value() > 0:
+            flags.append("平移耦合 %.2f" % self.sp_strafe_coupling.value())
         if self.sp_ramp_ms.value() > 0:
             flags.append("速度过渡 %d ms" % self.sp_ramp_ms.value())
+        flags.append("编码器 %.3f °/cm" % self._encoder_ticks_per_cm())
+        if abs(self.sp_distance_scale.value() - 1.0) > 0.001:
+            flags.append("实车倍率 %.3f×" % self.sp_distance_scale.value())
         flags_text = "\n  ".join(flags) if flags else "（无补偿/反转，原样导出）"
 
         # 预览前 8 步（混合显示）
@@ -1581,8 +1693,9 @@ class MainWindow(QtWidgets.QMainWindow):
         msg = (
             "当前补偿设置：\n  " + flags_text + "\n\n"
             + "导出序列：%d 步（运动 %d + 动作 %d）\n" % (
-                len(sequence), len(motion_steps), action_steps)
-            + "其中旋转步: %d（最大 |w|=%d）\n\n" % (nonzero_omega, max_abs_omega)
+                len(sequence), motion_count, action_steps)
+            + "其中编码器移动: %d，编码器旋转: %d，旋转步: %d（最大 |w|=%d）\n\n" % (
+                len(enc_move_steps), len(enc_rot_steps), nonzero_omega, max_abs_omega)
             + "前 8 步预览：\n" + preview + "\n\n"
             + "确认后写入 %s（自动 .bak 备份）" % self._current_profile().file_path.name
         )

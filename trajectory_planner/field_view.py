@@ -45,7 +45,7 @@ from PyQt5 import QtCore, QtGui, QtWidgets
 from .config import GRID_SPACING_CM
 from .obstacle_item import ObstacleItem
 from .path_item import PathItem
-from .smoothing import smooth_and_resample
+from .smoothing import normalize_drawn_path, smooth_and_resample
 from .action_block_item import ActionBlockItem, block_anchor
 
 
@@ -97,6 +97,34 @@ class FieldScene(QtWidgets.QGraphicsScene):
 
         self.smooth_iter = 3
         self.resample_step = 5.0
+
+    # ---- 绘制采样 ----
+    def _draw_sample_spacing(self):
+        return max(0.2, min(float(self.resample_step) * 0.12, 0.75))
+
+    def _append_draw_sample(self, seg, scene_pos, force=False):
+        x = float(scene_pos.x())
+        y = float(scene_pos.y())
+        if not seg.raw_points:
+            seg.append_raw(x, y)
+            return True
+
+        last_x, last_y = seg.raw_points[-1]
+        dx = x - last_x
+        dy = y - last_y
+        dist2 = dx * dx + dy * dy
+
+        if force:
+            if dist2 > 1e-9:
+                seg.append_raw(x, y)
+                return True
+            return False
+
+        spacing = self._draw_sample_spacing()
+        if dist2 >= spacing * spacing:
+            seg.append_raw(x, y)
+            return True
+        return False
 
     # ---- 向后兼容 ----
     @property
@@ -229,25 +257,28 @@ class FieldScene(QtWidgets.QGraphicsScene):
         self.action_chains.append([])
         self.segment_vehicle_ids.append(self.active_vehicle_id)
         self._drawing_seg = len(self.path_segments) - 1
-        seg.append_raw(scene_pos.x(), scene_pos.y())
+        self._append_draw_sample(seg, scene_pos, force=True)
         seg.preview_raw()
 
     def extend_path(self, scene_pos):
         if not self._drawing or self._drawing_seg < 0:
             return
         seg = self.path_segments[self._drawing_seg]
-        seg.append_raw(scene_pos.x(), scene_pos.y())
-        seg.preview_raw()
+        if self._append_draw_sample(seg, scene_pos):
+            seg.preview_raw()
 
-    def finish_path(self):
+    def finish_path(self, scene_pos=None):
         if not self._drawing or self._drawing_seg < 0:
             return
         self._drawing = False
         idx = self._drawing_seg
         self._drawing_seg = -1
         seg = self.path_segments[idx]
+        if scene_pos is not None:
+            self._append_draw_sample(seg, scene_pos, force=True)
         raw = list(seg.raw_points)
         if len(raw) >= 2:
+            raw = normalize_drawn_path(raw, self.resample_step)
             smoothed = smooth_and_resample(raw, self.smooth_iter, self.resample_step)
         else:
             smoothed = list(raw)
@@ -682,7 +713,8 @@ class FieldView(QtWidgets.QGraphicsView):
                 event.accept()
                 return
             if self.scene()._drawing:
-                self.scene().finish_path()
+                scene_pos = self.mapToScene(event.pos())
+                self.scene().finish_path(scene_pos)
                 event.accept()
                 return
         super().mouseReleaseEvent(event)

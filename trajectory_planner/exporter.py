@@ -196,10 +196,17 @@ def upsert_float_constant(text, name, value):
 
 def write_auto_sequence(sequence, robot_file=ROBOT_FILE, source_name="(manual)",
                         mode="translation", cm_per_s_at_p50=30.0, auto_power=50,
-                        ramp_ms=None, encoder_based=False):
+                        ramp_ms=None, encoder_based=False,
+                        encoder_ticks_per_cm=None,
+                        front_back_compensation=None,
+                        rotation_balance=None,
+                        strafe_vy_coupling=None):
     """主入口：备份 → 替换 AUTO_SEQUENCE → 写常量 → 校验 → 失败回滚
 
     encoder_based=True 时同时写入 ENCODER_TICKS_PER_CM、PID_KP 等闭环参数。
+    front_back_compensation 不为 None 时写入 FRONT_BACK_COMPENSATION 常量。
+    rotation_balance 不为 None 时写入 ROTATION_BALANCE 常量。
+    strafe_vy_coupling 不为 None 时写入 STRAFE_VY_COUPLING 常量。
     """
     robot_file = Path(robot_file)
     if not robot_file.exists():
@@ -226,7 +233,20 @@ def write_auto_sequence(sequence, robot_file=ROBOT_FILE, source_name="(manual)",
     # 闭环参数写回（v5 使用 novapi 内置 move()，只需 ENCODER_TICKS_PER_CM）
     if encoder_based:
         from .config import ENCODER_TICKS_PER_CM
-        new_text = upsert_float_constant(new_text, "ENCODER_TICKS_PER_CM", ENCODER_TICKS_PER_CM)
+        ticks_per_cm = ENCODER_TICKS_PER_CM if encoder_ticks_per_cm is None else encoder_ticks_per_cm
+        new_text = upsert_float_constant(new_text, "ENCODER_TICKS_PER_CM", ticks_per_cm)
+
+    # 前后重量补偿写回
+    if front_back_compensation is not None:
+        new_text = upsert_float_constant(new_text, "FRONT_BACK_COMPENSATION", front_back_compensation)
+
+    # 旋转均衡补偿写回
+    if rotation_balance is not None:
+        new_text = upsert_float_constant(new_text, "ROTATION_BALANCE", rotation_balance)
+
+    # 平移纵向耦合补偿写回
+    if strafe_vy_coupling is not None:
+        new_text = upsert_float_constant(new_text, "STRAFE_VY_COUPLING", strafe_vy_coupling)
 
     backup_path = robot_file.with_suffix(robot_file.suffix + ".bak")
     shutil.copy2(robot_file, backup_path)

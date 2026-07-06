@@ -230,13 +230,20 @@ class ActionBlockItem(QtWidgets.QGraphicsObject):
             return True
         return False
 
-    def to_sequence_steps(self, cm_per_s_at_p50=30.0, auto_power=50):
+    def to_sequence_steps(self, cm_per_s_at_p50=30.0, auto_power=50,
+                          encoder_based=False, ticks_per_cm=None):
         """返回一或多个 AUTO_SEQUENCE 兼容元组"""
         p = self.params
         if self.block_type == "drive":
             dist = float(p.get("distance_cm", 0))
             if dist < 0.01:
                 return []
+            if encoder_based:
+                if ticks_per_cm is None:
+                    from .config import ENCODER_TICKS_PER_CM
+                    ticks_per_cm = ENCODER_TICKS_PER_CM
+                ticks = int(round(dist * float(ticks_per_cm)))
+                return [("enc_move", ticks, int(auto_power), 0)]
             speed = cm_per_s_at_p50 * auto_power / 50.0
             dur = dist / max(speed, 0.1)
             return [(round(dur, 2), 0, int(auto_power), 0)]
@@ -261,10 +268,10 @@ class ActionBlockItem(QtWidgets.QGraphicsObject):
                      str(p.get("dc_port", "DC1")),
                      int(p.get("power", 100)))]
         if self.block_type == "oscillate":
-            return self._build_oscillate_sequence(p)
+            return self._build_oscillate_sequence(p, ticks_per_cm=ticks_per_cm)
         return []
 
-    def _build_oscillate_sequence(self, p):
+    def _build_oscillate_sequence(self, p, ticks_per_cm=None):
         """构建震荡序列。
 
         strafe_cm == 0（纯旋转）：使用 enc_rot 编码器闭环自旋扫掠。
@@ -282,15 +289,16 @@ class ActionBlockItem(QtWidgets.QGraphicsObject):
             return []
 
         if strafe_cm < 0.5:
-            return self._build_pure_oscillate(angle_deg, cycles, power)
+            return self._build_pure_oscillate(angle_deg, cycles, power, ticks_per_cm)
         else:
             return self._build_strafe_oscillate(angle_deg, cycles, power,
                                                  strafe_cm, strafe_power, drift_vy)
 
-    def _build_pure_oscillate(self, angle_deg, cycles, power):
+    def _build_pure_oscillate(self, angle_deg, cycles, power, ticks_per_cm=None):
         """纯旋转震荡：enc_rot 编码器闭环 + 自动收球"""
-        from .config import ENCODER_TICKS_PER_CM
-        ticks_per_cm = ENCODER_TICKS_PER_CM
+        if ticks_per_cm is None:
+            from .config import ENCODER_TICKS_PER_CM
+            ticks_per_cm = ENCODER_TICKS_PER_CM
 
         tick_half = int(round(abs(angle_deg) * ticks_per_cm * 0.5))
         tick_full = tick_half * 2
