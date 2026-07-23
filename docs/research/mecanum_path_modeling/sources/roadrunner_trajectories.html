@@ -1,0 +1,824 @@
+<!DOCTYPE html>
+<html lang="en-us" dir="ltr">
+<head>
+  <meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<meta name="description" content="Trajectories # Now it&rsquo;s time to combine paths with the motion profiles from earlier. Road Runner calls this composition a trajectory. Trajectories take time values and output the corresponding field frame kinematic state (i.e., real positions, velocities, and acceleration). This state can be transformed to the robot frame and fed directly into the feedforward component of the controller.
+Here&rsquo;s a sample for planning a Trajectory from a Path:
+Java TrajectoryVelocityConstraint velConstraint = new MinVelocityConstraint(Arrays.">
+<meta name="theme-color" media="(prefers-color-scheme: light)" content="#ffffff">
+<meta name="theme-color" media="(prefers-color-scheme: dark)" content="#343a40">
+<meta name="color-scheme" content="light dark"><meta property="og:title" content="Trajectories" />
+<meta property="og:description" content="Trajectories # Now it&rsquo;s time to combine paths with the motion profiles from earlier. Road Runner calls this composition a trajectory. Trajectories take time values and output the corresponding field frame kinematic state (i.e., real positions, velocities, and acceleration). This state can be transformed to the robot frame and fed directly into the feedforward component of the controller.
+Here&rsquo;s a sample for planning a Trajectory from a Path:
+Java TrajectoryVelocityConstraint velConstraint = new MinVelocityConstraint(Arrays." />
+<meta property="og:type" content="article" />
+<meta property="og:url" content="https://rr.brott.dev/docs/v0-5/tour/trajectories/" /><meta property="article:section" content="docs" />
+
+
+<title>Trajectories | Road Runner Docs</title>
+<link rel="manifest" href="/manifest.json">
+<link rel="icon" href="/favicon.png" >
+<link rel="stylesheet" href="/book.min.33a48f5432973b8ff9a82679d9e45d67f2c15d4399bd2829269455cfe390b5e8.css" integrity="sha256-M6SPVDKXO4/5qCZ52eRdZ/LBXUOZvSgpJpRVz&#43;OQteg=" crossorigin="anonymous">
+  <script defer src="/flexsearch.min.js"></script>
+  <script defer src="/en.search.min.0840d20475935a3cf079c619f3818b553a49b7702c58fbd51c4fc65af7e56fe1.js" integrity="sha256-CEDSBHWTWjzwecYZ84GLVTpJt3AsWPvVHE/GWvflb&#43;E=" crossorigin="anonymous"></script>
+<!--
+Made with Book Theme
+https://github.com/alex-shpak/hugo-book
+-->
+  
+</head>
+<body dir="ltr">
+  <input type="checkbox" class="hidden toggle" id="menu-control" />
+  <input type="checkbox" class="hidden toggle" id="toc-control" />
+  <main class="container flex">
+    <aside class="book-menu">
+      <div class="book-menu-content">
+        
+  <nav>
+<h2 class="book-brand">
+  <a class="flex align-center" href="/"><span>Road Runner Docs</span>
+  </a>
+</h2>
+
+
+<div class="book-search">
+  <input type="text" id="book-search-input" placeholder="Search" aria-label="Search" maxlength="64" data-hotkeys="s/" />
+  <div class="book-search-spinner hidden"></div>
+  <ul id="book-search-results"></ul>
+</div>
+
+
+
+
+
+
+
+
+
+
+
+
+  
+
+
+
+  
+  <ul>
+    
+      
+        <li>
+          
+  
+  
+
+  
+    <span>1.0.x</span>
+  
+
+          
+  <ul>
+    
+      
+        <li>
+          
+  
+  
+
+  
+    <a href="/docs/v1-0/installation/" class="">Installation</a>
+  
+
+        </li>
+      
+    
+      
+        <li>
+          
+  
+  
+
+  
+    <a href="/docs/v1-0/new-features/" class="">New Features</a>
+  
+
+        </li>
+      
+    
+      
+        <li>
+          
+  
+  
+
+  
+    <a href="/docs/v1-0/migration/" class="">Migrating from 0.5.x</a>
+  
+
+        </li>
+      
+    
+      
+        <li>
+          
+  
+  
+
+  
+    <a href="/docs/v1-0/actions/" class="">Actions</a>
+  
+
+        </li>
+      
+    
+      
+        <li>
+          
+  
+  
+
+  
+    <a href="/docs/v1-0/tuning/" class="">Tuning</a>
+  
+
+        </li>
+      
+    
+      
+        <li>
+          
+  
+  
+
+  
+    <a href="/docs/v1-0/api-docs/" class="">API Docs</a>
+  
+
+        </li>
+      
+    
+      
+        <li>
+          
+  
+  
+
+  
+    <a href="/docs/v1-0/builder-ref/" class="">Builder Reference</a>
+  
+
+        </li>
+      
+    
+      
+        <li>
+          
+  
+  
+
+  
+    <span>Guides</span>
+  
+
+          
+  <ul>
+    
+      
+        <li>
+          
+  
+  
+
+  
+    <a href="/docs/v1-0/guides/cancellation/" class="">Cancellation</a>
+  
+
+        </li>
+      
+    
+      
+        <li>
+          
+  
+  
+
+  
+    <a href="/docs/v1-0/guides/extra-correction/" class="">Extra Correction</a>
+  
+
+        </li>
+      
+    
+      
+        <li>
+          
+  
+  
+
+  
+    <a href="/docs/v1-0/guides/path-following/" class="">Path Following</a>
+  
+
+          
+  <ul>
+    
+  </ul>
+
+        </li>
+      
+    
+      
+        <li>
+          
+  
+  
+
+  
+    <a href="/docs/v1-0/guides/pose-mapping/" class="">Pose Mapping</a>
+  
+
+          
+  <ul>
+    
+  </ul>
+
+        </li>
+      
+    
+      
+        <li>
+          
+  
+  
+
+  
+    <a href="/docs/v1-0/guides/teleop-actions/" class="">Teleop Actions</a>
+  
+
+        </li>
+      
+    
+      
+        <li>
+          
+  
+  
+
+  
+    <a href="/docs/v1-0/guides/variable-constraints/" class="">Variable Constraints</a>
+  
+
+          
+  <ul>
+    
+  </ul>
+
+        </li>
+      
+    
+      
+        <li>
+          
+  
+  
+
+  
+    <a href="/docs/v1-0/guides/centerstage-auto/" class="">Building a CENTERSTAGE Autonomous</a>
+  
+
+        </li>
+      
+    
+      
+        <li>
+          
+  
+  
+
+  
+    <a href="/docs/v1-0/guides/continuity/" class="">Continuity</a>
+  
+
+          
+  <ul>
+    
+  </ul>
+
+        </li>
+      
+    
+      
+        <li>
+          
+  
+  
+
+  
+    <a href="/docs/v1-0/guides/ftclib-commands/" class="">FTCLib Commands</a>
+  
+
+        </li>
+      
+    
+      
+        <li>
+          
+  
+  
+
+  
+    <a href="/docs/v1-0/guides/tangents/" class="">Tangents</a>
+  
+
+          
+  <ul>
+    
+  </ul>
+
+        </li>
+      
+    
+  </ul>
+
+        </li>
+      
+    
+      
+        <li>
+          
+  
+  
+
+  
+    <a href="/docs/v1-0/log-files/" class="">Log Files</a>
+  
+
+        </li>
+      
+    
+      
+        <li>
+          
+  
+  
+
+  
+    <a href="/docs/v1-0/modules/" class="">Modules</a>
+  
+
+        </li>
+      
+    
+  </ul>
+
+        </li>
+      
+    
+      
+        <li>
+          
+  
+  
+
+  
+    <span>0.5.x</span>
+  
+
+          
+  <ul>
+    
+      
+        <li>
+          
+  
+  
+
+  
+    <a href="/docs/v0-5/installation/" class="">Installation</a>
+  
+
+        </li>
+      
+    
+      
+        <li>
+          
+  
+  
+
+  
+    <a href="/docs/v0-5/kdoc/" class="">KDoc</a>
+  
+
+        </li>
+      
+    
+      
+        <li>
+          
+  
+  
+
+  
+    <a href="/docs/v0-5/javadoc/" class="">Javadoc</a>
+  
+
+        </li>
+      
+    
+      
+        <li>
+          
+  
+  
+
+  
+    <span>Tour</span>
+  
+
+          
+  <ul>
+    
+      
+        <li>
+          
+  
+  
+
+  
+    <a href="/docs/v0-5/tour/introduction/" class="">Introduction</a>
+  
+
+        </li>
+      
+    
+      
+        <li>
+          
+  
+  
+
+  
+    <a href="/docs/v0-5/tour/pid-control/" class="">PID Control</a>
+  
+
+        </li>
+      
+    
+      
+        <li>
+          
+  
+  
+
+  
+    <a href="/docs/v0-5/tour/feedforward-control/" class="">Feedforward Control</a>
+  
+
+        </li>
+      
+    
+      
+        <li>
+          
+  
+  
+
+  
+    <a href="/docs/v0-5/tour/motion-profiling/" class="">Motion Profiling</a>
+  
+
+        </li>
+      
+    
+      
+        <li>
+          
+  
+  
+
+  
+    <a href="/docs/v0-5/tour/coordinate-frame/" class="">Coordinate Frames</a>
+  
+
+        </li>
+      
+    
+      
+        <li>
+          
+  
+  
+
+  
+    <a href="/docs/v0-5/tour/parametric-paths/" class="">Parametric Paths</a>
+  
+
+        </li>
+      
+    
+      
+        <li>
+          
+  
+  
+
+  
+    <a href="/docs/v0-5/tour/trajectories/" class="active">Trajectories</a>
+  
+
+        </li>
+      
+    
+      
+        <li>
+          
+  
+  
+
+  
+    <a href="/docs/v0-5/tour/kinematics/" class="">Kinematics</a>
+  
+
+        </li>
+      
+    
+  </ul>
+
+        </li>
+      
+    
+      
+        <li>
+          
+  
+  
+
+  
+    <span>Quickstart</span>
+  
+
+          
+  <ul>
+    
+      
+        <li>
+          
+  
+  
+
+  
+    <a href="/docs/v0-5/quickstart/introduction/" class="">Introduction</a>
+  
+
+        </li>
+      
+    
+      
+        <li>
+          
+  
+  
+
+  
+    <a href="/docs/v0-5/quickstart/tuning/" class="">Tuning</a>
+  
+
+        </li>
+      
+    
+      
+        <li>
+          
+  
+  
+
+  
+    <a href="/docs/v0-5/quickstart/faq/" class="">FAQ</a>
+  
+
+        </li>
+      
+    
+  </ul>
+
+        </li>
+      
+    
+  </ul>
+
+        </li>
+      
+    
+      
+        <li>
+          
+  
+  
+
+  
+    <a href="/docs/resources/" class="">Resources</a>
+  
+
+        </li>
+      
+    
+      
+        <li>
+          
+  
+  
+
+  
+    <a href="/docs/meepmeep/" class="">MeepMeep Visualizer</a>
+  
+
+        </li>
+      
+    
+  </ul>
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+</nav>
+
+
+
+
+  <script>(function(){var e=document.querySelector("aside .book-menu-content");addEventListener("beforeunload",function(){localStorage.setItem("menu.scrollTop",e.scrollTop)}),e.scrollTop=localStorage.getItem("menu.scrollTop")})()</script>
+
+
+ 
+      </div>
+    </aside>
+
+    <div class="book-page">
+      <header class="book-header">
+        
+  <div class="flex align-center justify-between">
+  <label for="menu-control">
+    <img src="/svg/menu.svg" class="book-icon" alt="Menu" />
+  </label>
+
+  <strong>Trajectories</strong>
+
+  <label for="toc-control">
+    
+    <img src="/svg/toc.svg" class="book-icon" alt="Table of Contents" />
+    
+  </label>
+</div>
+
+
+  
+  <aside class="hidden clearfix">
+    
+  
+<nav id="TableOfContents"></nav>
+
+
+
+  </aside>
+  
+ 
+      </header>
+
+      
+      
+  <article class="markdown"><h1 id="trajectories">
+  Trajectories
+  <a class="anchor" href="#trajectories">#</a>
+</h1>
+<p>Now it&rsquo;s time to combine paths with the motion profiles from earlier. Road Runner calls this composition a trajectory. Trajectories take time values and output the corresponding field frame kinematic state (i.e., real positions, velocities, and acceleration). This state can be transformed to the robot frame and fed directly into the feedforward component of the controller.</p>
+<p>Here&rsquo;s a sample for planning a <code>Trajectory</code> from a <code>Path</code>:</p>
+
+
+
+
+<div class="book-tabs"><input type="radio" class="toggle" name="tabs-vel constraints" id="tabs-vel constraints-0" checked="checked" />
+  <label for="tabs-vel constraints-0">Java</label>
+  <div class="book-tabs-content markdown-inner"><div class="highlight"><pre tabindex="0" style="color:#f8f8f2;background-color:#272822;-moz-tab-size:4;-o-tab-size:4;tab-size:4;"><code class="language-java" data-lang="java"><span style="display:flex;"><span>TrajectoryVelocityConstraint velConstraint <span style="color:#f92672">=</span> <span style="color:#66d9ef">new</span> MinVelocityConstraint<span style="color:#f92672">(</span>Arrays<span style="color:#f92672">.</span><span style="color:#a6e22e">asList</span><span style="color:#f92672">(</span>
+</span></span><span style="display:flex;"><span>    <span style="color:#66d9ef">new</span> TranslationalVelocityConstraint<span style="color:#f92672">(</span><span style="color:#ae81ff">20</span><span style="color:#f92672">),</span>
+</span></span><span style="display:flex;"><span>    <span style="color:#66d9ef">new</span> AngularVelocityConstraint<span style="color:#f92672">(</span><span style="color:#ae81ff">1</span><span style="color:#f92672">)</span>
+</span></span><span style="display:flex;"><span><span style="color:#f92672">));</span>
+</span></span><span style="display:flex;"><span>TrajectoryAccelerationConstraint accelConstraint <span style="color:#f92672">=</span> <span style="color:#66d9ef">new</span> ProfileAccelerationConstraint<span style="color:#f92672">(</span><span style="color:#ae81ff">40</span><span style="color:#f92672">);</span>
+</span></span><span style="display:flex;"><span>Trajectory traj <span style="color:#f92672">=</span> TrajectoryGenerator<span style="color:#f92672">.</span><span style="color:#a6e22e">generateTrajectory</span><span style="color:#f92672">(</span>path<span style="color:#f92672">,</span> velConstraint<span style="color:#f92672">,</span> accelConstraint<span style="color:#f92672">);</span>
+</span></span></code></pre></div></div><input type="radio" class="toggle" name="tabs-vel constraints" id="tabs-vel constraints-1"  />
+  <label for="tabs-vel constraints-1">Kotlin</label>
+  <div class="book-tabs-content markdown-inner"><div class="highlight"><pre tabindex="0" style="color:#f8f8f2;background-color:#272822;-moz-tab-size:4;-o-tab-size:4;tab-size:4;"><code class="language-kotlin" data-lang="kotlin"><span style="display:flex;"><span><span style="color:#66d9ef">val</span> velConstraint = MinVelocityConstraint(listOf(
+</span></span><span style="display:flex;"><span>    TranslationalVelocityConstraint(<span style="color:#ae81ff">20.0</span>),
+</span></span><span style="display:flex;"><span>    AngularVelocityConstraint(<span style="color:#ae81ff">1.0</span>)
+</span></span><span style="display:flex;"><span>))
+</span></span><span style="display:flex;"><span><span style="color:#66d9ef">val</span> accelConstraint = ProfileAccelerationConstraint(<span style="color:#ae81ff">40.0</span>)
+</span></span><span style="display:flex;"><span><span style="color:#66d9ef">val</span> traj = <span style="color:#a6e22e">TrajectoryGenerator</span>.generateTrajectory(path, velConstraint, accelConstraint)
+</span></span></code></pre></div></div></div>
+
+<p>As indicated by their names, the constraints limit translational velocity, angular velocity, and profile acceleration. It&rsquo;s common to replace the translational velocity constraint with a stronger constraint that limits wheel velocities. These constraints are named according to the drive types (e.g., <code>MecanumVelocityConstraint</code>).</p>
+<blockquote class="book-hint info">
+  There is also a <code>TrajectoryBuilder</code> class that replicates the API of <code>PathBuilder</code> with a few additions.
+</blockquote>
+
+<p>Once a trajectory is finally generated, one of the <code>TrajectoryFollowers</code> can be used to generate the actual <code>DriveSignals</code> that are sent to the <code>Drive</code> class. The PIDVA followers are usually suitable, although <code>RamseteFollower</code> has noticeably better performance for tank drives.</p>
+<p>Following a trajectory is as simple as creating a follower, calling <code>TrajectoryFollower.followTrajectory()</code>, and repeatedly querying <code>TrajectoryFollower.update()</code>:</p>
+
+
+
+
+<div class="book-tabs"><input type="radio" class="toggle" name="tabs-pidva follower" id="tabs-pidva follower-0" checked="checked" />
+  <label for="tabs-pidva follower-0">Java</label>
+  <div class="book-tabs-content markdown-inner"><div class="highlight"><pre tabindex="0" style="color:#f8f8f2;background-color:#272822;-moz-tab-size:4;-o-tab-size:4;tab-size:4;"><code class="language-java" data-lang="java"><span style="display:flex;"><span>PIDCoefficients translationalPid <span style="color:#f92672">=</span> <span style="color:#66d9ef">new</span> PIDCoefficients<span style="color:#f92672">(</span><span style="color:#ae81ff">5</span><span style="color:#f92672">,</span> <span style="color:#ae81ff">0</span><span style="color:#f92672">,</span> <span style="color:#ae81ff">0</span><span style="color:#f92672">);</span>
+</span></span><span style="display:flex;"><span>PIDCoefficients headingPid <span style="color:#f92672">=</span> <span style="color:#66d9ef">new</span> PIDCoefficients<span style="color:#f92672">(</span><span style="color:#ae81ff">2</span><span style="color:#f92672">,</span> <span style="color:#ae81ff">0</span><span style="color:#f92672">,</span> <span style="color:#ae81ff">0</span><span style="color:#f92672">);</span>
+</span></span><span style="display:flex;"><span>HolonomicPIDVAFollower follower <span style="color:#f92672">=</span> <span style="color:#66d9ef">new</span> HolonomicPIDVAFollower<span style="color:#f92672">(</span>translationalPid<span style="color:#f92672">,</span> translationalPid<span style="color:#f92672">,</span> headingPid<span style="color:#f92672">);</span>
+</span></span><span style="display:flex;"><span>
+</span></span><span style="display:flex;"><span>follower<span style="color:#f92672">.</span><span style="color:#a6e22e">followTrajectory</span><span style="color:#f92672">(</span>traj<span style="color:#f92672">);</span>
+</span></span><span style="display:flex;"><span>
+</span></span><span style="display:flex;"><span><span style="color:#75715e">// call in loop
+</span></span></span><span style="display:flex;"><span><span style="color:#75715e"></span>DriveSignal signal <span style="color:#f92672">=</span> follower<span style="color:#f92672">.</span><span style="color:#a6e22e">update</span><span style="color:#f92672">(</span>poseEstimate<span style="color:#f92672">);</span>
+</span></span></code></pre></div></div><input type="radio" class="toggle" name="tabs-pidva follower" id="tabs-pidva follower-1"  />
+  <label for="tabs-pidva follower-1">Kotlin</label>
+  <div class="book-tabs-content markdown-inner"><div class="highlight"><pre tabindex="0" style="color:#f8f8f2;background-color:#272822;-moz-tab-size:4;-o-tab-size:4;tab-size:4;"><code class="language-kotlin" data-lang="kotlin"><span style="display:flex;"><span><span style="color:#66d9ef">val</span> translationalPid = PIDCoefficients(<span style="color:#ae81ff">5.0</span>, <span style="color:#ae81ff">0.0</span>, <span style="color:#ae81ff">0.0</span>)
+</span></span><span style="display:flex;"><span><span style="color:#66d9ef">val</span> headingPid = PIDCoefficients(<span style="color:#ae81ff">2.0</span>, <span style="color:#ae81ff">0.0</span>, <span style="color:#ae81ff">0.0</span>)
+</span></span><span style="display:flex;"><span><span style="color:#66d9ef">val</span> follower = HolonomicPIDVAFollower(translationalPid, translationalPid, headingPid)
+</span></span><span style="display:flex;"><span>
+</span></span><span style="display:flex;"><span>follower.followTrajectory(traj)
+</span></span><span style="display:flex;"><span>
+</span></span><span style="display:flex;"><span><span style="color:#75715e">// call in loop
+</span></span></span><span style="display:flex;"><span><span style="color:#75715e"></span><span style="color:#66d9ef">val</span> signal = follower.update(poseEstimate)
+</span></span></code></pre></div></div></div>
+
+</article>
+ 
+      
+
+
+      <footer class="book-footer">
+        
+  <div class="flex flex-wrap justify-between">
+
+
+
+
+
+</div>
+
+
+
+  <script>(function(){function e(e){const t=window.getSelection(),n=document.createRange();n.selectNodeContents(e),t.removeAllRanges(),t.addRange(n)}document.querySelectorAll("pre code").forEach(t=>{t.addEventListener("click",function(){if(window.getSelection().toString())return;e(t.parentElement),navigator.clipboard&&navigator.clipboard.writeText(t.parentElement.textContent)})})})()</script>
+
+
+ 
+        
+      </footer>
+
+      
+  
+  <div class="book-comments">
+
+</div>
+  
+ 
+
+      <label for="menu-control" class="hidden book-menu-overlay"></label>
+    </div>
+
+    
+    <aside class="book-toc">
+      <div class="book-toc-content">
+        
+  
+<nav id="TableOfContents"></nav>
+
+
+ 
+      </div>
+    </aside>
+    
+  </main>
+
+  
+</body>
+</html>
+
+
+
+
+
+
+
+
+
+
+
+

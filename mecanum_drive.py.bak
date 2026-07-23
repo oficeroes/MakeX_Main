@@ -1,133 +1,40 @@
-"""
-Mecanum 4WD Robot — Remote Control Program
-============================================
-Novapi-based X-type mecanum wheel chassis remote control.
-  Left stick  → omnidirectional movement
-  Right stick → in-place rotation
-  Both sticks can be used simultaneously (e.g. strafe + rotate).
-
-Hardware:
-  Chassis — Encoder motor x4 (X-type mecanum layout)
-    - M1 (front-left)  — normal wiring
-    - M2 (front-right) — reversed wiring
-    - M3 (rear-left)   — normal wiring
-    - M4 (rear-right)  — reversed wiring
-  Actuators —
-    - DC1/DC2/DC3 — DC motors (ball collector), power expand board
-    - M5 — Encoder motor (ball roller)
-    - BL1/BL2 — Brushless motors, power expand board
-    - SV1/SV2 — Smart servos, M6 port chain (INDEX1/INDEX2)
-
-Controls:
-  Left stick  ↑↓  = forward/back (指数曲线, 低速细腻)
-  Left stick  ←→  = strafe left/right
-  Right stick ←→  = rotate left/right (独立曲线指数)
-  N1          — both servos fire (BL must be on first)
-  N2          — M5=-100 + DC2=+100
-  N4          — M5=+100 + DC2=-100
-  N3          — unused
-  D-pad ↑↓   — BL speed ±5 (range 10~100)
-  D-pad ←     — DC3 oscillate -100↔+100 toggle
-  D-pad →     — unused
-  R2          — BL1+BL2 both on/off
-  L1          — face flip toggle (swap front/back)
-  L2          — unused
-  R1          — unused
-  Menu (≡)    — debug mode toggle
-  +           — start auto program (AUTO_SEQUENCE)
-
-X-type Mecanum Kinematics:
-            Forward (+Vy)
-                ^
-         M1 <--+--> M2    (FL M1, FR M2)
-                |
-         M3 <--+--> M4    (RL M3, RR M4)
-
-  Standard inverse kinematics (all wheels forward = positive rotation):
-    M1_raw =  Vx + Vy + omega
-    M2_raw = -Vx + Vy - omega
-    M3_raw = -Vx + Vy + omega
-    M4_raw =  Vx + Vy - omega
-
-  M2, M4 reversed wiring correction:
-    M2_out = -( -Vx + Vy - omega) =  Vx - Vy + omega
-    M4_out = -(  Vx + Vy - omega) = -Vx - Vy + omega
-
-  Vector scaling: if any |power| > 100, scale all 4 proportionally.
-"""
 import novapi
 import time
 from mbuild import gamepad
 from mbuild import power_expand_board
 from mbuild.encoder_motor import encoder_motor_class
 from mbuild.led_matrix import led_matrix_class
-
-# ---- Smart servo: optional, robot may not have this hardware ----
 try:
     from mbuild.smartservo import smartservo_class
     _HAS_SERVO = True
 except ImportError:
     _HAS_SERVO = False
     smartservo_class = None
-
-# ==================== Configuration ====================
-SPEED_SCALE = 0.85       # 最大功率倍率 (摇杆推满 = 85%)
-DEAD_ZONE = 0            # 摇杆死区 (|值| < 8 → 0)
-CURVE_LIFT = 20          # 曲线最低输出%: 摇杆一推就有此值 (0=关闭, 建议10~20)
-MIN_MOTOR_POWER = 10     # 电机安全兜底 (应 < CURVE_LIFT×SPEED_SCALE, 否则无效)
-LOOP_DELAY = 0.02        # 主循环间隔 (秒)
-JOYSTICK_EXPO = 2.0      # 摇杆指数曲线: 1.0=线性, 1.3=柔顺, 2.0=二次 (越小低速越灵敏)
-OMEGA_EXPO = 2.0         # 旋转摇杆独立曲线指数 (通常与平移一致, 可单独调)
-
+SPEED_SCALE = 0.65
+DEAD_ZONE = 3
+LOOP_DELAY = 0.02
 INVERT_VX = False
 INVERT_VY = True
 INVERT_OMEGA = True
-
-# 前后重量补偿：尾重头轻 → 前轮 (M1/M2) 加力、后轮 (M3/M4) 减力
-# 范围 0.0 ~ 0.50，0 = 不补偿。仅影响 Vy（直走/后退）分量。
-# 写入时机：绘图程序导出时自动更新。
 FRONT_BACK_COMPENSATION = 0.0000
-
-# 旋转均衡补偿：尾重导致旋转时前后轮出力不均 → 前轮 omega 加力
-# 范围 0.0 ~ 0.50，0 = 不补偿。仅影响 omega（旋转）分量。
-# 独立于前后补偿，因为旋转力学与直走不同。
-# 写入时机：绘图程序导出时自动更新。
 ROTATION_BALANCE = 0.0000
-
-# 平移纵向耦合补偿：尾重导致平移时向前漂移 → 根据 |Vx| 自动减 Vy
-# 范围 0.0 ~ 0.30，0 = 不补偿。值越大反向拉回越强。
-# 公式：Vy = Vy - |Vx| × 此值（仅当 |Vx| > |Vy| 时生效，即主要在做平移）
-# 写入时机：绘图程序导出时自动更新。
-STRAFE_VY_COUPLING = 0.0000
-
-# 起步助推：功率从零→非零的瞬间，短暂额外加力克服静摩擦。
-# 只在"刚启动"起作用，持续 STARTUP_BURST_MS 后自动退出。不读传感器 → 零延迟。
-STARTUP_BURST_ENABLE = True   # 总开关 (False=关闭)
-STARTUP_BURST_PCT = 30        # 起步时额外增加功率% (叠加在运动学输出上)
-STARTUP_BURST_MS = 150        # 助推持续时间 (毫秒)
-
-# DC collector motors
+STRAFE_VY_COUPLING = 0.0200
+STICK_LOW_PIVOT = 20
+STICK_LOW_OUT = 18
+STICK_HIGH_EXPO = 1.7
 DC_COLLECTOR_PORT1 = "DC1"
 DC_COLLECTOR_PORT2 = "DC2"
 DC_COLLECTOR_PORT3 = "DC3"
 DC_COLLECTOR_SPEED = 100
-
-# M5 roller motor
 ROLLER_SPEED = 80
-
-# Servo fire action (L1=SV1, R1=SV2)
 BL_ACTION_SPEED = 80
 BL_SPINUP_DELAY = 0.1
 SERVO1_ACTION_ANGLE = -40
 SERVO2_ACTION_ANGLE = 40
 SERVO_ACTION_SPEED = 50
 SERVO_RETURN_DELAY = 0.14
-
-# 8x16 LED matrix (landscape: 16col x 8row)
 LED_PORT = "PORT2"
 LED_INDEX = "INDEX1"
-
-# Debug mode
 DEBUG_TEST_SPEED = 50
 DEBUG_SERVO_ANGLE = 90
 SERVO_MOVE_SPEED = 30
@@ -137,56 +44,48 @@ DEBUG_DC_NAMES = ["DC1", "DC2"]
 DEBUG_BLDC_NAMES = ["BL1", "BL2"]
 DEBUG_SERVO_NAMES = ["SV1", "SV2"]
 DEBUG_ALL_NAMES = [DEBUG_MOTOR_NAMES, DEBUG_DC_NAMES, DEBUG_BLDC_NAMES, DEBUG_SERVO_NAMES]
-
-# ==================== Auto Program ====================
 AUTO_SPEED = 50
 AUTO_STEP_DELAY = 0.02
-AUTO_RAMP_MS = 0
-AUTO_ACCEL_MS = 0               # ms: within-step 0→100→0 acceleration ramp
-
-# ==================== Debug Calibration ====================
-DEBUG_CAL_POWER    = 50    # forward power % for encoder calibration in debug mode
-DEBUG_CAL_DURATION = 1.0   # seconds to drive during calibration
-DEBUG_CAL_ACCEL_MS = 250   # ms ramp-up/down (same shape as AUTO_ACCEL_MS)
+AUTO_RAMP_MS = 40
+AUTO_ACCEL_MS = 0
+DEBUG_CAL_POWER    = 50
+DEBUG_CAL_DURATION = 1.0
+DEBUG_CAL_ACCEL_MS = 250
+TURN_TICKS_PER_DEG = 11.1435
 AUTO_SEQUENCE = [
-    # === Auto-generated by trajectory_planner on 2026-07-06 23:02 ===
-    # Source: (encoder calibration)  |  Format: v4-time
-    # Mode: translation | speed: 30.0 cm/s | power: 50
-    ('encoder_cal', 1.0, 0, 50, 0),
-    ( 0.10,    0,    0,    0),
+    # === Auto-generated by trajectory_planner on 2026-07-09 12:46 ===
+    # Source: D:\UserData\Desktop\MakeX_Main\step_sequences\step_sequence_001.json  |  Format: v5-encoder
+    # Mode: step_sequence | speed: 0.0 cm/s | power: 0
+    ('open_move', 251, 0, 0, -74),
+    ('enc_move', 3303, 100, 0),
+    ('dc_motor', 'DC1', -100),
+    ('dc_motor', 'DC2', -100),
+    ('enc_move', 1125, 0, 100),
+    ('enc_move', 3514, 0, -70),
+    ('enc_stop', 0, 0, 0),
 ]
-
-# ==================== Hardware Init ====================
 __motor_M1 = encoder_motor_class("M1", "INDEX1")
 __motor_M2 = encoder_motor_class("M2", "INDEX1")
 __motor_M3 = encoder_motor_class("M3", "INDEX1")
 __motor_M4 = encoder_motor_class("M4", "INDEX1")
 __motor_M5 = encoder_motor_class("M5", "INDEX1")
 __led = led_matrix_class(LED_PORT, LED_INDEX)
-
 if _HAS_SERVO:
     try:
         __servo_1 = smartservo_class("M6", "INDEX1")
         __servo_2 = smartservo_class("M6", "INDEX2")
     except Exception:
         _HAS_SERVO = False
-
-# ==================== Kinematics ====================
 def mecanum_kinematics(Vx, Vy, omega):
-    # 平移纵向耦合补偿：尾重 → 平移时向前漂移，按 |Vx| 比例减 Vy 拉回
     sc = STRAFE_VY_COUPLING
     if sc > 0.001 and abs(Vx) > abs(Vy) and abs(Vx) > 0.5:
         Vy = Vy - abs(Vx) * sc
-
     M1 =  Vx + Vy + omega
     M2 = -Vx + Vy - omega
     M3 = -Vx + Vy + omega
     M4 =  Vx + Vy - omega
-
     M2 = -M2
     M4 = -M4
-
-    # 前后重量补偿：尾重头轻 → 前轮 (M1/M2) 加力、后轮 (M3/M4) 减力
     fb = FRONT_BACK_COMPENSATION
     if fb > 0.001:
         front_gain = 1.0 + fb
@@ -195,19 +94,14 @@ def mecanum_kinematics(Vx, Vy, omega):
         M2 *= front_gain
         M3 *= rear_gain
         M4 *= rear_gain
-
-    # 旋转均衡补偿：尾重 → 旋转时前后出力不均
     rb = ROTATION_BALANCE
     if rb > 0.001:
-        # 后乘方式会影响已混合的 Vx/Vy/omega，与 fb 同理
-        # 旋转均衡独立于前后补偿，对调前后轮的 omega 贡献
         rot_front = 1.0 + rb
         rot_rear  = 1.0 - rb
         M1 *= rot_front
         M2 *= rot_front
         M3 *= rot_rear
         M4 *= rot_rear
-
     max_abs = max(abs(M1), abs(M2), abs(M3), abs(M4))
     if max_abs > 100:
         scale = 100.0 / max_abs
@@ -215,97 +109,22 @@ def mecanum_kinematics(Vx, Vy, omega):
         M2 *= scale
         M3 *= scale
         M4 *= scale
-
-    # 最小功率托底：防止低速时个别轮子因负载太重转不动
-    M1 = apply_min_power(M1)
-    M2 = apply_min_power(M2)
-    M3 = apply_min_power(M3)
-    M4 = apply_min_power(M4)
-
     return M1, M2, M3, M4
-
-
 def apply_dead_zone(value, threshold=DEAD_ZONE):
     if abs(value) < threshold:
         return 0
     return value
-
-
-def apply_min_power(power):
-    """电机最小功率托底：功率太低电机转不动 → 强制提升到 MIN_MOTOR_POWER。
-
-    0 值保持不动（静止轮子不强制启动）。
-    仅当 0 < |power| < MIN_MOTOR_POWER 时才提升。
-    """
-    if MIN_MOTOR_POWER <= 0:
-        return power
-    if 0 < power < MIN_MOTOR_POWER:
-        return MIN_MOTOR_POWER
-    if -MIN_MOTOR_POWER < power < 0:
-        return -MIN_MOTOR_POWER
-    return power
-
-
-def startup_burst(m1_pwr, m2_pwr, m3_pwr, m4_pwr, now):
-    """起步瞬间助推：检测 0→非0 跳变 → 短暂加力克服静摩擦。
-
-    只在功率从零变非零的瞬间触发，持续 STARTUP_BURST_MS 后自动退出。
-    不读速度传感器 → 零延迟。
-    返回调整后的 (m1_pwr, m2_pwr, m3_pwr, m4_pwr)。
-    """
-    global _burst_until, _last_nonzero
-
-    if not STARTUP_BURST_ENABLE:
-        return m1_pwr, m2_pwr, m3_pwr, m4_pwr
-
-    powers = [m1_pwr, m2_pwr, m3_pwr, m4_pwr]
-    adjusted = list(powers)
-    burst_end = now + STARTUP_BURST_MS / 1000.0
-
-    for i in range(4):
-        is_running = abs(powers[i]) > 0
-
-        if is_running and not _last_nonzero[i]:
-            # 0 → 非0 跳变：启动助推计时器
-            _burst_until[i] = burst_end
-
-        _last_nonzero[i] = is_running
-
-        if now < _burst_until[i] and abs(powers[i]) > 0:
-            # 助推生效中：在运动学功率上叠加
-            sign = 1 if powers[i] >= 0 else -1
-            boosted = abs(powers[i]) + STARTUP_BURST_PCT
-            adjusted[i] = sign * min(100, boosted)
-
-    return tuple(adjusted)
-
-
-def apply_response_curve(value, exponent=JOYSTICK_EXPO, max_input=100.0):
-    """带抬升的指数响应曲线。
-
-    纯指数:  output = (|v|/100)^expo × 100
-    抬升后:  output = L + (100-L) × (|v|/100)^expo
-    其中 L = CURVE_LIFT，确保摇杆一推就有最低响应。
-
-    示例 (exponent=2.0, L=15):
-      摇杆 5%  → 15.2%  (一推就动)
-      摇杆 20% → 18.4%
-      摇杆 50% → 36.3%
-      摇杆 100% → 100%  (满杆不变)
-    """
+def apply_response_curve(value, max_input=100.0):
     if value == 0:
         return 0.0
     sign = 1.0 if value > 0 else -1.0
-    normalized = abs(value) / max_input
-    curved = normalized ** exponent
-
-    if CURVE_LIFT > 0:
-        lift = CURVE_LIFT / max_input
-        curved = lift + (1.0 - lift) * curved
-
-    return sign * curved * max_input
-
-
+    x = abs(value)
+    if x <= STICK_LOW_PIVOT:
+        y = STICK_LOW_OUT * x / STICK_LOW_PIVOT
+    else:
+        t = (x - STICK_LOW_PIVOT) / (max_input - STICK_LOW_PIVOT)
+        y = STICK_LOW_OUT + (max_input - STICK_LOW_OUT) * (t ** STICK_HIGH_EXPO)
+    return sign * y
 def stop_all_motors():
     __motor_M1.set_power(0)
     __motor_M2.set_power(0)
@@ -323,8 +142,6 @@ def stop_all_motors():
             __servo_2.set_power(0)
         except Exception:
             pass
-
-
 def debug_stop_motor():
     if debug_motor_type == 0:
         motor = [__motor_M1, __motor_M2, __motor_M3, __motor_M4, __motor_M5][debug_motor_index]
@@ -342,62 +159,40 @@ def debug_stop_motor():
                 servo.set_power(0)
             except Exception:
                 pass
-
-
-# ==================== State ====================
-# Normal mode
 bl1_on = False
 bl2_on = False
-face_flipped = False          # L1: 面翻转（正面↔反面）
-
-# 起步助推状态：记录每个电机助推结束时刻和上一轮是否在转
-_burst_until = [0.0, 0.0, 0.0, 0.0]     # M1~M4 助推结束时间戳
-_last_nonzero = [False, False, False, False]  # 上一轮是否非零
-
-# Encoder calibration deltas (filled after debug-mode + key calibration)
-_cal_delta_M1 = None      # encoder delta for M1 after calibration
-_cal_delta_M2 = None      # encoder delta for M2
-_cal_delta_M3 = None      # encoder delta for M3
-_cal_delta_M4 = None      # encoder delta for M4
-_enc_cal_start = [0, 0, 0, 0]  # encoder start values snapshot
-
-# Auto-mode encoder calibration state (global, NOT object attributes — MicroPython safe)
-_enc_cal_auto_started = False       # True = first tick already done
-_enc_cal_M1_start = 0               # M1 start count snapshot
-_enc_cal_M2_start = 0               # M2 start count snapshot
-_enc_cal_M3_start = 0               # M3 start count snapshot
-_enc_cal_M4_start = 0               # M4 start count snapshot
-
-# Set to True after calibration so N1-N4 show deltas
+face_flipped = False
+_cal_delta_M1 = None
+_cal_delta_M2 = None
+_cal_delta_M3 = None
+_cal_delta_M4 = None
+_enc_cal_start = [0, 0, 0, 0]
+_enc_cal_auto_started = False
+_enc_cal_M1_start = 0
+_enc_cal_M2_start = 0
+_enc_cal_M3_start = 0
+_enc_cal_M4_start = 0
 _debug_cal_done = False
 _cal_display_until = 0.0
 _CAL_DISPLAY_HOLD_S = 4.0
-
-# Auto program
 auto_mode = False
 auto_step = 0
 auto_step_start = 0.0
 auto_prev_Vx = 0.0
 auto_prev_Vy = 0.0
 auto_prev_omega = 0.0
-
-# Servo fire sequence (L1=SV1, R1=SV2)
 sv1_phase = 0
 sv1_time = 0.0
 sv2_phase = 0
 sv2_time = 0.0
-
-# M5 roller motor
 m5_speed = 0
-n2_on = False                # N2 切换状态
-n4_on = False                # N4 切换状态
-dc3_osc = False              # N3: DC3 振荡模式开关
-dc3_osc_dir = 1               # N3: DC3 振荡当前方向 1=正 -1=负
-dc3_osc_timer = 0.0           # N3: DC3 振荡上次翻转时刻
-_dpad_lr_conflict = 0          # D-pad 左右冲突连续计数
-_dpad_ud_conflict = 0          # D-pad 上下冲突连续计数
-
-# Debug mode
+n2_on = False
+n4_on = False
+dc3_osc = False
+dc3_osc_dir = 1
+dc3_osc_timer = 0.0
+_dpad_lr_conflict = 0
+_dpad_ud_conflict = 0
 debug_mode = False
 debug_motor_type = 0
 debug_motor_index = 0
@@ -405,8 +200,6 @@ debug_show_speed_until = 0.0
 debug_show_ok = False
 servo_moved = False
 servo_dir = 1
-
-# Edge detection (normal mode)
 last_N1 = False
 last_N2 = False
 last_N3 = False
@@ -421,79 +214,41 @@ last_Dpad_Up = False
 last_Dpad_Down = False
 last_Dpad_Left = False
 last_Dpad_Right = False
-
-# Edge detection (debug mode)
 last_Up = False
 last_Down = False
 last_Left = False
 last_Right = False
-
-# ==================== 编码器闭环参数（基于 novapi get_value("angle") 角度制）====================
-# novapi 编码电机使用 get_value("angle") 返回角度（度），没有 get_count()！
-# ENCODER_TICKS_PER_CM: GUI 端标定常数（编码器角度/cm），机器人端用于距离换算
-ENCODER_TICKS_PER_CM = 18.0000
-# Novapi move() 使用编码器角度。这里必须用实测角度/cm，
-# 不能用理想轮周 360/(πD)，否则实际距离会明显偏小。
+ENCODER_TICKS_PER_CM = 70.2870
 _DEG_PER_CM = ENCODER_TICKS_PER_CM
 _TICKS_TO_DEG = 1.0
-# 到位死区（度）：电机角度误差小于此值视为到达
 PROFILE_DEADBAND_DEG = 8
-# 每步最大等待时间（秒），防止卡死
 _ENC_STEP_TIMEOUT = 8.0
-# 功率 → rpm 映射：move(deg, rpm) 的速度参数
-# power=85 → 680rpm（电机物理解限约200-250rpm，设高确保不成为瓶颈）
 _RPM_PER_POWER = 8.0
-
-# Keep all encoder moves on the same novapi move() position loop.  The old raw
-# power strafe mode made sideways motion much faster than forward motion.
 STRAFE_POWER_MODE = False
 STRAFE_DOMINANT_RATIO = 0.55
 STRAFE_POWER_BOOST = 1.35
 STRAFE_MIN_POWER = 75
 STRAFE_DISTANCE_SCALE = 1.00
 STRAFE_DECEL_START = 0.92
-
-# 编码器闭环状态（简化：用 novapi 内置 move() 替代自定义 PID）
-_enc_targets = [0, 0, 0, 0]        # M1-M4 目标角度（绝对角度，度）
-_enc_step_initialized = -1           # 已初始化的 auto_step 索引
-_enc_step_start_time = 0.0           # 当前步开始时刻
-
-# ==================== 编码器闭环函数（基于 novapi move() + get_value("angle")）====================
-# novapi 编码电机有内置位置闭环 move(degrees, rpm)，无需自己写 PID！
-# get_value("angle") 返回当前角度（度），move() 是非阻塞的相对角度转动。
-
-_motors = None  # 延迟初始化，在第一次调用时赋值
-
+_enc_targets = [0, 0, 0, 0]
+_enc_step_initialized = -1
+_enc_step_start_time = 0.0
+_motors = None
 def _get_motors():
-    """返回四轮电机列表（延迟初始化，避免模块加载顺序问题）"""
     global _motors
     if _motors is None:
         _motors = [__motor_M1, __motor_M2, __motor_M3, __motor_M4]
     return _motors
-
-
 def _reset_drive_encoder_reference(reason="auto"):
-    """Reset drive encoder reference before auto/calibration starts.
-
-    Novapi encoder_motor.move() is relative, and this program also snapshots
-    current angles before each encoder move, so manual pushes before start are
-    already safe.  This function adds an explicit best-effort zero step for the
-    pit/field workflow: if the firmware exposes a zeroing method, use it; either
-    way, refresh the software baseline immediately before running.
-    """
     global _enc_targets, _enc_step_initialized, _enc_step_start_time
     global _enc_power_mode, _enc_start_angles, _enc_move_degrees, _enc_move_powers
-    global _burst_until, _last_nonzero
-
     motors = _get_motors()
-
     for m in motors:
         try:
             m.set_power(0)
         except Exception:
             pass
     time.sleep(0.05)
-
     reset_count = 0
     for m in motors:
         did_reset = False
@@ -506,16 +261,13 @@ def _reset_drive_encoder_reference(reason="auto"):
                 pass
         if did_reset:
             reset_count += 1
-
     time.sleep(0.05)
-
     starts = []
     for m in motors:
         try:
             starts.append(m.get_value("angle"))
         except Exception:
             starts.append(0)
-
     _enc_targets = [int(v) for v in starts]
     _enc_start_angles = list(starts)
     _enc_move_degrees = [0, 0, 0, 0]
@@ -523,16 +275,10 @@ def _reset_drive_encoder_reference(reason="auto"):
     _enc_power_mode = False
     _enc_step_initialized = -1
     _enc_step_start_time = novapi.timer()
-    _burst_until = [0.0, 0.0, 0.0, 0.0]
-    _last_nonzero = [False, False, False, False]
-
     print(">>> enc_reset(%s): zero_methods=%d baseline M1=%d M2=%d M3=%d M4=%d" %
           (reason, reset_count, int(starts[0]), int(starts[1]),
            int(starts[2]), int(starts[3])))
-
-
 def _show_cal_delta(motor_idx, value):
-    """Highest-priority calibration readout for N1-N4."""
     global _cal_display_until
     if value is None:
         __led.show("NONE")
@@ -542,15 +288,11 @@ def _show_cal_delta(motor_idx, value):
         __led.show("E%d" % delta)
         print(">>> CAL M%d delta = %d" % (motor_idx, delta))
     _cal_display_until = novapi.timer() + _CAL_DISPLAY_HOLD_S
-
-
 def _resolve_zero_enc_move(step_index, vy_power, vx_power):
     if abs(vy_power) >= 1 or abs(vx_power) >= 1:
         return vy_power, vx_power
-
     prev_vec = None
     next_vec = None
-
     i = step_index - 1
     while i >= 0:
         s = AUTO_SEQUENCE[i]
@@ -559,7 +301,6 @@ def _resolve_zero_enc_move(step_index, vy_power, vx_power):
                 prev_vec = (s[2], s[3])
                 break
         i -= 1
-
     i = step_index + 1
     while i < len(AUTO_SEQUENCE):
         s = AUTO_SEQUENCE[i]
@@ -568,7 +309,6 @@ def _resolve_zero_enc_move(step_index, vy_power, vx_power):
                 next_vec = (s[2], s[3])
                 break
         i += 1
-
     if prev_vec is not None and next_vec is not None:
         dot = prev_vec[0] * next_vec[0] + prev_vec[1] * next_vec[1]
         if dot > 0:
@@ -579,30 +319,17 @@ def _resolve_zero_enc_move(step_index, vy_power, vx_power):
                 return vy, vx
         print(">>> enc_move: repaired zero vector with next move")
         return next_vec[0], next_vec[1]
-
     if next_vec is not None:
         print(">>> enc_move: repaired zero vector with next move")
         return next_vec[0], next_vec[1]
-
     if prev_vec is not None:
         print(">>> enc_move: repaired zero vector with previous move")
         return prev_vec[0], prev_vec[1]
-
     return vy_power, vx_power
-
-
 def _enc_move_start(total_ticks, vy_power, vx_power=0):
-    """初始化编码器直走：计算目标角度 → 调用 novapi move()
-
-    total_ticks: GUI 导出的 ticks 值（ticks = cm × ENCODER_TICKS_PER_CM）
-    vy_power:   前进功率百分比（Vy，正=前）
-    vx_power:   平移功率百分比（Vx，正=右，负=左）
-    """
     global _enc_targets, _enc_step_start_time
     global _enc_power_mode, _enc_start_angles, _enc_move_degrees, _enc_move_powers
-
     motors = _get_motors()
-
     if abs(vy_power) < 1 and abs(vx_power) < 1:
         _enc_power_mode = False
         starts = [m.get_value("angle") for m in motors]
@@ -610,12 +337,8 @@ def _enc_move_start(total_ticks, vy_power, vx_power=0):
         _enc_step_start_time = novapi.timer()
         print(">>> enc_move: skip zero-power move (ticks=%d)" % total_ticks)
         return
-
-    # ticks → cm → 度
     distance_cm = abs(total_ticks) / ENCODER_TICKS_PER_CM
-    total_degrees = distance_cm * _DEG_PER_CM  # 每个轮子转动的角度
-
-    # 运动方向由 total_ticks 符号决定（正=前进，负=后退）
+    total_degrees = distance_cm * _DEG_PER_CM
     direction = 1 if total_ticks >= 0 else -1
     max_axis_power = max(abs(vy_power), abs(vx_power))
     strafe_dominant = (STRAFE_POWER_MODE
@@ -623,10 +346,8 @@ def _enc_move_start(total_ticks, vy_power, vx_power=0):
                        and abs(vx_power) / max_axis_power >= STRAFE_DOMINANT_RATIO)
     if strafe_dominant:
         total_degrees *= STRAFE_DISTANCE_SCALE
-
-    # 用运动学计算各轮方向与功率分配
     vy_dir = vy_power * direction
-    vx_dir = vx_power * direction  # Vx 方向也跟随前进/后退符号
+    vx_dir = vx_power * direction
     M1p, M2p, M3p, M4p = mecanum_kinematics(vx_dir, vy_dir, 0)
     wheel_powers = [M1p, M2p, M3p, M4p]
     max_wheel_power = max(abs(M1p), abs(M2p), abs(M3p), abs(M4p))
@@ -640,15 +361,10 @@ def _enc_move_start(total_ticks, vy_power, vx_power=0):
     signs = [1 if M1p >= 0 else -1, 1 if M2p >= 0 else -1,
              1 if M3p >= 0 else -1, 1 if M4p >= 0 else -1]
     wheel_degrees = [signs[i] * total_degrees * scales[i] for i in range(4)]
-
-    # 记录起始位置 → 计算目标绝对角度
     starts = [m.get_value("angle") for m in motors]
     _enc_targets = [int(starts[i] + wheel_degrees[i]) for i in range(4)]
-
-    # 速度：功率% → rpm（取 Vy 和 Vx 中较大的）
     max_pwr = max(abs(vy_power), abs(vx_power))
     motor_rpm = max(30, int(max_pwr * _RPM_PER_POWER))
-
     if strafe_dominant:
         _enc_power_mode = True
         _enc_start_angles = starts
@@ -679,10 +395,7 @@ def _enc_move_start(total_ticks, vy_power, vx_power=0):
                int(max(abs(_enc_move_powers[0]), abs(_enc_move_powers[1]),
                        abs(_enc_move_powers[2]), abs(_enc_move_powers[3])))))
         return
-
     _enc_power_mode = False
-
-    # 调用 novapi 内置位置闭环：非阻塞，电机会自动停到目标
     for i in range(4):
         try:
             move_degrees = int(wheel_degrees[i])
@@ -693,28 +406,16 @@ def _enc_move_start(total_ticks, vy_power, vx_power=0):
                 motors[i].move(move_degrees, move_rpm)
         except Exception:
             pass
-
     _enc_step_start_time = novapi.timer()
     print(">>> enc_move: %.1fcm (%d°) Vx=%d Vy=%d @%drpm" %
           (distance_cm, int(total_degrees), vx_power, vy_power, motor_rpm))
-
-
 def _enc_move_tick(max_power, stop_motors=True):
-    """编码器直走单步检测 → 返回 True=已到达目标
-
-    novapi 的 move() 会自动减速停在目标角度，这里只需检查是否到位。
-    加入超时保护防止卡死。
-
-    v5.1: stop_motors=False 时到达目标不刹停，用于连续 enc_move 衔接。
-    """
     global _enc_power_mode
     motors = _get_motors()
-
     try:
         power_mode = _enc_power_mode
     except NameError:
         power_mode = False
-
     if power_mode:
         if novapi.timer() - _enc_step_start_time > _ENC_STEP_TIMEOUT:
             if stop_motors:
@@ -723,7 +424,6 @@ def _enc_move_tick(max_power, stop_motors=True):
             _enc_power_mode = False
             print(">>> enc_strafe: timeout")
             return True
-
         progress = 1.0
         active = False
         for i in range(4):
@@ -737,19 +437,16 @@ def _enc_move_tick(max_power, stop_motors=True):
                         progress = p
                 except Exception:
                     pass
-
         if (not active) or progress >= 1.0:
             if stop_motors:
                 for m in motors:
                     m.set_power(0)
             _enc_power_mode = False
             return True
-
         factor = 1.0
         if progress >= STRAFE_DECEL_START:
             remain = (1.0 - progress) / max(1.0 - STRAFE_DECEL_START, 0.01)
             factor = max(0.45, min(1.0, remain))
-
         for i in range(4):
             try:
                 if abs(_enc_move_degrees[i]) < 1:
@@ -758,18 +455,13 @@ def _enc_move_tick(max_power, stop_motors=True):
                     motors[i].set_power(_enc_move_powers[i] * factor)
             except Exception:
                 pass
-
         return False
-
-    # 超时保护
     if novapi.timer() - _enc_step_start_time > _ENC_STEP_TIMEOUT:
         if stop_motors:
             for m in motors:
                 m.set_power(0)
         print(">>> enc_move: 超时，强制进入下一步")
         return True
-
-    # 检查四轮是否到位
     all_done = True
     for i in range(4):
         try:
@@ -779,80 +471,101 @@ def _enc_move_tick(max_power, stop_motors=True):
                 break
         except Exception:
             pass
-
     if all_done:
         if stop_motors:
             for m in motors:
                 m.set_power(0)
         return True
-
     return False
-
-
 def _enc_rot_start(total_ticks, omega_power):
-    """初始化编码器自旋：计算目标角度 → 调用 novapi move()"""
     global _enc_targets, _enc_step_start_time
-
     motors = _get_motors()
-
     if abs(omega_power) < 1:
         starts = [m.get_value("angle") for m in motors]
         _enc_targets = [int(v) for v in starts]
         _enc_step_start_time = novapi.timer()
         print(">>> enc_rot: skip zero-power rotate (ticks=%d)" % total_ticks)
         return
-
-    # ticks → 旋转角度（度）
-    # 自旋时 ticks 代表旋转编码量，直接换算为角度
     distance_cm = abs(total_ticks) / ENCODER_TICKS_PER_CM
     total_degrees = distance_cm * _DEG_PER_CM
-
     direction = 1 if total_ticks >= 0 else -1
-
-    # 自旋运动学
     w_dir = omega_power * direction
     M1p, M2p, M3p, M4p = mecanum_kinematics(0, 0, w_dir)
     signs = [1 if M1p >= 0 else -1, 1 if M2p >= 0 else -1,
              1 if M3p >= 0 else -1, 1 if M4p >= 0 else -1]
-
     starts = [m.get_value("angle") for m in motors]
     _enc_targets = [int(starts[i] + signs[i] * total_degrees) for i in range(4)]
-
     motor_rpm = max(30, int(abs(omega_power) * _RPM_PER_POWER))
-
     for i in range(4):
         try:
             motors[i].move(int(signs[i] * total_degrees), motor_rpm)
         except Exception:
             pass
-
     _enc_step_start_time = novapi.timer()
     print(">>> enc_rot: %.1f° @%drpm" % (total_degrees, motor_rpm))
-
-
 def _enc_rot_tick(max_power, stop_motors=True):
-    """编码器自旋单步检测 → 返回 True=已到达目标（v5.1: 支持连续衔接）"""
     return _enc_move_tick(max_power, stop_motors=stop_motors)
 
-
-# ==================== Startup ====================
+def _enc_moverot_start(total_ticks, vy_power, vx_power, omega_power, rot_ticks):
+    global _enc_targets, _enc_step_start_time, _enc_power_mode
+    motors = _get_motors()
+    _enc_power_mode = False
+    move_degrees = [0.0, 0.0, 0.0, 0.0]
+    if abs(vy_power) >= 1 or abs(vx_power) >= 1:
+        distance_cm = abs(total_ticks) / ENCODER_TICKS_PER_CM
+        total_degrees = distance_cm * _DEG_PER_CM
+        direction = 1 if total_ticks >= 0 else -1
+        vy_dir = vy_power * direction
+        vx_dir = vx_power * direction
+        M1p, M2p, M3p, M4p = mecanum_kinematics(vx_dir, vy_dir, 0)
+        wheel_powers = [M1p, M2p, M3p, M4p]
+        max_wheel_power = max(abs(M1p), abs(M2p), abs(M3p), abs(M4p))
+        if max_wheel_power >= 1:
+            scales = [abs(p) / max_wheel_power for p in wheel_powers]
+            signs = [1 if p >= 0 else -1 for p in wheel_powers]
+            move_degrees = [signs[i] * total_degrees * scales[i] for i in range(4)]
+    rot_degrees = [0.0, 0.0, 0.0, 0.0]
+    if abs(omega_power) >= 1:
+        rot_distance_cm = abs(rot_ticks) / ENCODER_TICKS_PER_CM
+        rot_total_degrees = rot_distance_cm * _DEG_PER_CM
+        rot_direction = 1 if rot_ticks >= 0 else -1
+        w_dir = omega_power * rot_direction
+        R1, R2, R3, R4 = mecanum_kinematics(0, 0, w_dir)
+        rsigns = [1 if p >= 0 else -1 for p in (R1, R2, R3, R4)]
+        rot_degrees = [rsigns[i] * rot_total_degrees for i in range(4)]
+    combined = [move_degrees[i] + rot_degrees[i] for i in range(4)]
+    starts = [m.get_value("angle") for m in motors]
+    if max(abs(combined[0]), abs(combined[1]), abs(combined[2]), abs(combined[3])) < 0.5:
+        _enc_targets = [int(v) for v in starts]
+        _enc_step_start_time = novapi.timer()
+        return
+    _enc_targets = [int(starts[i] + combined[i]) for i in range(4)]
+    max_deg = max(abs(combined[0]), abs(combined[1]), abs(combined[2]), abs(combined[3]), 1)
+    base_pwr = max(abs(vy_power), abs(vx_power), abs(omega_power))
+    base_rpm = max(30, int(base_pwr * _RPM_PER_POWER))
+    for i in range(4):
+        try:
+            if abs(combined[i]) > 0.5:
+                wheel_rpm = max(15, int(base_rpm * abs(combined[i]) / max_deg))
+                motors[i].move(int(combined[i]), wheel_rpm)
+            else:
+                motors[i].set_power(0)
+        except Exception:
+            pass
+    _enc_step_start_time = novapi.timer()
+    print(">>> enc_moverot: move_ticks=%d rot_ticks=%d Vx=%d Vy=%d w=%d" %
+          (total_ticks, rot_ticks, vx_power, vy_power, omega_power))
+def _enc_moverot_tick(max_power, stop_motors=True):
+    return _enc_move_tick(max_power, stop_motors=stop_motors)
 
 __led.show("Main")
 novapi.reset_timer()
-
-# ==================== Main Loop ====================
 while True:
-    # ================================================================
-    #  Auto Mode
-    # ================================================================
     if auto_mode:
         elapsed = novapi.timer() - auto_step_start
         step = AUTO_SEQUENCE[auto_step]
-
-        # ---- Tagged command tuple (first element is a string) ----
         if isinstance(step[0], str):
             tag = step[0]
-
             if tag == "servo":
                 _, sv_id, angle, speed, wait_ms = step
                 if elapsed < AUTO_STEP_DELAY * 1.5:
@@ -869,7 +582,6 @@ while True:
                         auto_step = 0
                     else:
                         auto_step_start = novapi.timer()
-
             elif tag == "delay":
                 dur = step[1]
                 if elapsed >= dur:
@@ -879,51 +591,79 @@ while True:
                         auto_step = 0
                     else:
                         auto_step_start = novapi.timer()
-
             elif tag == "motor":
-                # 设置编码电机持续转动（立即执行，不等待）
                 _, motor_id, power = step
-                motor_map = {"M1": __motor_M1, "M2": __motor_M2, "M3": __motor_M3,
-                             "M4": __motor_M4, "M5": __motor_M5}
-                m = motor_map.get(str(motor_id))
-                if m is not None:
-                    m.set_power(int(power))
-                    print(">>> motor %s → %d%%" % (motor_id, power))
-                auto_step += 1
-                if auto_step >= len(AUTO_SEQUENCE):
-                    auto_mode = False
-                    auto_step = 0
-                else:
-                    auto_step_start = novapi.timer()
-
+                if _enc_step_initialized != auto_step:
+                    motor_map = {"M1": __motor_M1, "M2": __motor_M2, "M3": __motor_M3,
+                                 "M4": __motor_M4, "M5": __motor_M5}
+                    m = motor_map.get(str(motor_id))
+                    if m is not None:
+                        m.set_power(int(power))
+                        print(">>> motor %s → %d%%" % (motor_id, power))
+                    _enc_step_start_time = novapi.timer()
+                    _enc_step_initialized = auto_step
+                if novapi.timer() - _enc_step_start_time >= 0.05:
+                    auto_step += 1
+                    if auto_step >= len(AUTO_SEQUENCE):
+                        auto_mode = False
+                        auto_step = 0
+                    else:
+                        auto_step_start = novapi.timer()
             elif tag == "dc_motor":
-                # 设置直流电机持续转动（立即执行，不等待）
                 _, dc_port, power = step
-                port = str(dc_port)
-                power_expand_board.set_power(port, int(power))
-                print(">>> dc_motor %s → %d%%" % (port, power))
+                if _enc_step_initialized != auto_step:
+                    port = str(dc_port)
+                    power_expand_board.set_power(port, int(power))
+                    print(">>> dc_motor %s → %d%%" % (port, power))
+                    _enc_step_start_time = novapi.timer()
+                    _enc_step_initialized = auto_step
+                if novapi.timer() - _enc_step_start_time >= 0.05:
+                    auto_step += 1
+                    if auto_step >= len(AUTO_SEQUENCE):
+                        auto_mode = False
+                        auto_step = 0
+                    else:
+                        auto_step_start = novapi.timer()
+            elif tag == "traj_v":
+                _, dur_s, step_Vx, step_Vy, step_omega = step
+                if INVERT_VX:
+                    step_Vx = -step_Vx
+                if INVERT_VY:
+                    step_Vy = -step_Vy
+                if INVERT_OMEGA:
+                    step_omega = -step_omega
+                M1p, M2p, M3p, M4p = mecanum_kinematics(step_Vx, step_Vy, step_omega)
+                __motor_M1.set_power(M1p)
+                __motor_M2.set_power(M2p)
+                __motor_M3.set_power(M3p)
+                __motor_M4.set_power(M4p)
+                if elapsed >= dur_s:
+                    auto_step += 1
+                    if auto_step >= len(AUTO_SEQUENCE):
+                        stop_all_motors()
+                        auto_mode = False
+                        auto_step = 0
+                    else:
+                        auto_step_start = novapi.timer()
+            elif tag == "traj_stop":
+                stop_all_motors()
                 auto_step += 1
                 if auto_step >= len(AUTO_SEQUENCE):
                     auto_mode = False
                     auto_step = 0
+                    print(">>> 连续轨迹完成")
                 else:
                     auto_step_start = novapi.timer()
-
             elif tag == "enc_move":
-                # v5.1 编码器闭环：使用 novapi 内置 move()，支持 Vx+Vy 双分量
-                # 修复"一格一格走"：当下一步也是 enc_move 时，不刹停，直接衔接
                 _, total_ticks, vy_power, vx_power = step
                 vy_power, vx_power = _resolve_zero_enc_move(auto_step, vy_power, vx_power)
                 if _enc_step_initialized != auto_step:
                     _enc_move_start(total_ticks, vy_power, vx_power)
                     _enc_step_initialized = auto_step
-
-                # 预判下一步：如果是连续同向 enc_move，提前衔接避免停顿
                 next_step = AUTO_SEQUENCE[auto_step + 1] if auto_step + 1 < len(AUTO_SEQUENCE) else None
                 next_is_enc_move = (next_step is not None
                                     and isinstance(next_step[0], str)
                                     and next_step[0] == 'enc_move')
-
                 max_pwr = max(abs(vy_power), abs(vx_power))
                 if _enc_move_tick(max_pwr, stop_motors=(not next_is_enc_move)):
                     auto_step += 1
@@ -932,20 +672,15 @@ while True:
                         stop_all_motors()
                     else:
                         auto_step_start = novapi.timer()
-
             elif tag == "enc_rot":
-                # v5.1 编码器闭环自旋：使用 novapi 内置 move() 位置控制
-                # 修复"一格一格走"：当下一步也是 enc_rot 时，不刹停，直接衔接
                 _, total_ticks, _vy, omega_power = step
                 if _enc_step_initialized != auto_step:
                     _enc_rot_start(total_ticks, omega_power)
                     _enc_step_initialized = auto_step
-
                 next_step = AUTO_SEQUENCE[auto_step + 1] if auto_step + 1 < len(AUTO_SEQUENCE) else None
                 next_is_enc_rot = (next_step is not None
                                    and isinstance(next_step[0], str)
                                    and next_step[0] == 'enc_rot')
-
                 if _enc_rot_tick(abs(omega_power), stop_motors=(not next_is_enc_rot)):
                     auto_step += 1
                     if auto_step >= len(AUTO_SEQUENCE):
@@ -953,9 +688,46 @@ while True:
                         stop_all_motors()
                     else:
                         auto_step_start = novapi.timer()
-
+            elif tag == "enc_moverot":
+                _, total_ticks, vy_power, vx_power, omega_power, rot_ticks = step
+                if _enc_step_initialized != auto_step:
+                    _enc_moverot_start(total_ticks, vy_power, vx_power,
+                                       omega_power, rot_ticks)
+                    _enc_step_initialized = auto_step
+                next_step = AUTO_SEQUENCE[auto_step + 1] if auto_step + 1 < len(AUTO_SEQUENCE) else None
+                next_is_moverot = (next_step is not None
+                                   and isinstance(next_step[0], str)
+                                   and next_step[0] == "enc_moverot")
+                if _enc_move_tick(max(abs(vy_power), abs(vx_power), abs(omega_power)),
+                                  stop_motors=(not next_is_moverot)):
+                    auto_step += 1
+                    if auto_step >= len(AUTO_SEQUENCE):
+                        auto_mode = False; auto_step = 0
+                        stop_all_motors()
+                    else:
+                        auto_step_start = novapi.timer()
+            elif tag == "open_move":
+                # ('open_move', duration_ms, vy, vx, omega)
+                if _enc_step_initialized != auto_step:
+                    _vy = step[2]; _vx = step[3] if len(step) > 3 else 0
+                    _ow = step[4] if len(step) > 4 else 0
+                    M1p, M2p, M3p, M4p = mecanum_kinematics(_vx, _vy, _ow)
+                    motors = _get_motors()
+                    try:
+                        motors[0].set_power(int(M1p)); motors[1].set_power(int(M2p))
+                        motors[2].set_power(int(M3p)); motors[3].set_power(int(M4p))
+                    except Exception:
+                        pass
+                    _enc_step_start_time = novapi.timer()
+                    _enc_step_initialized = auto_step
+                if novapi.timer() - _enc_step_start_time >= step[1] / 1000.0:
+                    stop_all_motors()
+                    auto_step += 1
+                    if auto_step >= len(AUTO_SEQUENCE):
+                        auto_mode = False; auto_step = 0
+                    else:
+                        auto_step_start = novapi.timer()
             elif tag == "enc_stop":
-                # v5 停止缓冲：短暂停顿后进入下一步（不终止整个序列）
                 stop_all_motors()
                 auto_step += 1
                 if auto_step >= len(AUTO_SEQUENCE):
@@ -965,13 +737,10 @@ while True:
                 else:
                     auto_step_start = novapi.timer()
                     print(">>> enc_stop → 步骤 %d/%d" % (auto_step + 1, len(AUTO_SEQUENCE)))
-
             elif tag == "encoder_cal":
-                # Encoder calibration from GUI: record angles → drive → compute deltas
-                _, cal_dur, cal_Vx, cal_Vy, cal_omega = step  # 5-tuple
+                _, cal_dur, cal_Vx, cal_Vy, cal_omega = step
                 if not _enc_cal_auto_started:
                     _reset_drive_encoder_reference("encoder_cal")
-                    # First tick: snapshot start encoder angles
                     _enc_cal_M1_start = __motor_M1.get_value("angle")
                     _enc_cal_M2_start = __motor_M2.get_value("angle")
                     _enc_cal_M3_start = __motor_M3.get_value("angle")
@@ -982,9 +751,7 @@ while True:
                     print(">>> 编码器标定开始（GUI）！初始角度 M1=%d M2=%d M3=%d M4=%d" %
                           (_enc_cal_M1_start, _enc_cal_M2_start,
                            _enc_cal_M3_start, _enc_cal_M4_start))
-
                 if elapsed >= cal_dur:
-                    # Calibration complete: record end angles
                     M1_end = __motor_M1.get_value("angle")
                     M2_end = __motor_M2.get_value("angle")
                     M3_end = __motor_M3.get_value("angle")
@@ -1004,7 +771,6 @@ while True:
                           (_cal_delta_M1, _cal_delta_M2, _cal_delta_M3, _cal_delta_M4))
                     print("    按 N1/N2/N3/N4 在 LED 查看各电机增量（E####）")
                 else:
-                    # Drive forward during calibration
                     _cvx = cal_Vx
                     _cvy = cal_Vy
                     _cw = cal_omega
@@ -1019,9 +785,7 @@ while True:
                     __motor_M2.set_power(M2p)
                     __motor_M3.set_power(M3p)
                     __motor_M4.set_power(M4p)
-
             elif tag == "spin":
-                # Spin in place: ("spin", degrees, omega_power)
                 _, deg, _w = step
                 rot_speed = 90.0 * abs(_w) / 50.0
                 need_dur = abs(deg) / max(rot_speed, 1.0)
@@ -1045,25 +809,18 @@ while True:
                         auto_step = 0
                     else:
                         auto_step_start = novapi.timer()
-
             else:
-                # Unknown tag: skip
                 auto_step += 1
                 auto_step_start = novapi.timer()
-
             time.sleep(AUTO_STEP_DELAY)
             continue
-
-        # ---- Standard 4-tuple motion step ----
         step_duration, step_Vx, step_Vy, step_omega = step
-
         if INVERT_VX:
             step_Vx = -step_Vx
         if INVERT_VY:
             step_Vy = -step_Vy
         if INVERT_OMEGA:
             step_omega = -step_omega
-
         if elapsed >= step_duration:
             auto_prev_Vx = step_Vx
             auto_prev_Vy = step_Vy
@@ -1082,7 +839,6 @@ while True:
                 if not isinstance(nstep[0], str):
                     nd, nVx, nVy, nw = nstep
         else:
-            # Between-step interpolation
             if AUTO_RAMP_MS > 0 and elapsed * 1000.0 < AUTO_RAMP_MS:
                 alpha = elapsed * 1000.0 / AUTO_RAMP_MS
                 Vx_out = auto_prev_Vx + (step_Vx - auto_prev_Vx) * alpha
@@ -1092,39 +848,27 @@ while True:
                 Vx_out = step_Vx
                 Vy_out = step_Vy
                 omega_out = step_omega
-
-            # Within-step acceleration ramp (0→100→0) to prevent wheel slip
             step_ms = step_duration * 1000.0
             elapsed_ms = elapsed * 1000.0
             if AUTO_ACCEL_MS > 0 and step_ms > AUTO_ACCEL_MS * 2:
                 if elapsed_ms < AUTO_ACCEL_MS:
-                    # Ramp up: power goes 0 → target
                     accel = elapsed_ms / AUTO_ACCEL_MS
                 elif elapsed_ms > step_ms - AUTO_ACCEL_MS:
-                    # Ramp down: power goes target → 0
                     accel = (step_ms - elapsed_ms) / AUTO_ACCEL_MS
                 else:
-                    # Cruise at full power
                     accel = 1.0
             else:
                 accel = 1.0
-
             Vx_out *= accel
             Vy_out *= accel
             omega_out *= accel
-
             M1p, M2p, M3p, M4p = mecanum_kinematics(Vx_out, Vy_out, omega_out)
             __motor_M1.set_power(M1p)
             __motor_M2.set_power(M2p)
             __motor_M3.set_power(M3p)
             __motor_M4.set_power(M4p)
-
         time.sleep(AUTO_STEP_DELAY)
         continue
-
-    # ================================================================
-    #  Debug Mode
-    # ================================================================
     if debug_mode:
         cur_Up = gamepad.is_key_pressed("Up")
         cur_Down = gamepad.is_key_pressed("Down")
@@ -1138,8 +882,7 @@ while True:
         cur_Menu = gamepad.is_key_pressed("≡")
         cur_R1 = gamepad.is_key_pressed("R1")
         cur_L1 = gamepad.is_key_pressed("L1")
-
-        # ≡ key: exit debug mode
+        cur_R2 = gamepad.is_key_pressed("R2")
         if cur_Menu and not last_Menu:
             debug_stop_motor()
             debug_mode = False
@@ -1151,18 +894,9 @@ while True:
             debug_show_ok = False
             time.sleep(0.3)
             continue
-
-        # ----------------------------------------------------------------
-        #  + key: encoder calibration / auto sequence
-        #    If AUTO_SEQUENCE has a tagged step → start auto sequence
-        #    Otherwise → built-in blocking calibration
-        # ----------------------------------------------------------------
         if cur_Plus and not last_Plus:
             last_Plus = cur_Plus
-
-            # Check if GUI exported a calibration / auto sequence
             if len(AUTO_SEQUENCE) > 0 and isinstance(AUTO_SEQUENCE[0][0], str):
-                # Start auto sequence (exits debug mode)
                 debug_stop_motor()
                 debug_mode = False
                 stop_all_motors()
@@ -1186,8 +920,6 @@ while True:
                 last_Menu = cur_Menu
                 time.sleep(0.3)
                 continue
-
-            # --- Built-in calibration (blocking inner loop) ---
             stop_all_motors()
             _reset_drive_encoder_reference("debug_cal")
             _enc_cal_start[:] = [
@@ -1198,12 +930,10 @@ while True:
             ]
             __led.show("Cal")
             novapi.reset_timer()
-            # --- drive loop ---
             while True:
                 cal_elapsed = novapi.timer()
                 cal_dur_ms = DEBUG_CAL_DURATION * 1000.0
                 cal_elapsed_ms = cal_elapsed * 1000.0
-                # 0 → full → 0 ramp
                 if DEBUG_CAL_ACCEL_MS > 0 and cal_dur_ms > DEBUG_CAL_ACCEL_MS * 2:
                     if cal_elapsed_ms < DEBUG_CAL_ACCEL_MS:
                         accel = cal_elapsed_ms / DEBUG_CAL_ACCEL_MS
@@ -1225,7 +955,6 @@ while True:
                 time.sleep(LOOP_DELAY)
                 if cal_elapsed >= DEBUG_CAL_DURATION:
                     break
-            # --- stop and record ---
             __motor_M1.set_power(0)
             __motor_M2.set_power(0)
             __motor_M3.set_power(0)
@@ -1241,16 +970,10 @@ while True:
             _cal_delta_M3 = _enc_end[2] - _enc_cal_start[2]
             _cal_delta_M4 = _enc_end[3] - _enc_cal_start[3]
             _debug_cal_done = True
-            # Show M1 delta right away; N1-N4 can recall each motor below
             _show_cal_delta(1, _cal_delta_M1)
             time.sleep(0.5)
             continue
-
         last_Plus = cur_Plus
-
-        # ----------------------------------------------------------------
-        #  After calibration: N1/N2/N3/N4 show each motor's delta
-        # ----------------------------------------------------------------
         cal_key_handled = False
         if _debug_cal_done:
             if cur_N1 and not last_N1:
@@ -1265,7 +988,6 @@ while True:
             if cur_N4 and not last_N4:
                 _show_cal_delta(4, _cal_delta_M4)
                 cal_key_handled = True
-
         if cal_key_handled:
             last_Up = cur_Up
             last_Down = cur_Down
@@ -1278,8 +1000,6 @@ while True:
             last_Menu = cur_Menu
             time.sleep(LOOP_DELAY)
             continue
-
-        # D-pad ↑/↓: switch motor type
         if cur_Up and not last_Up:
             debug_motor_type = (debug_motor_type + 1) % len(DEBUG_MOTOR_TYPES)
             max_idx = len(DEBUG_ALL_NAMES[debug_motor_type]) - 1
@@ -1294,8 +1014,6 @@ while True:
                 debug_motor_index = 0
             name = DEBUG_ALL_NAMES[debug_motor_type][debug_motor_index]
             __led.show(name)
-
-        # D-pad ←/→: switch motor index
         max_idx = len(DEBUG_ALL_NAMES[debug_motor_type]) - 1
         if cur_Left and not last_Left:
             debug_motor_index = (debug_motor_index - 1) % (max_idx + 1)
@@ -1305,8 +1023,6 @@ while True:
             debug_motor_index = (debug_motor_index + 1) % (max_idx + 1)
             name = DEBUG_ALL_NAMES[debug_motor_type][debug_motor_index]
             __led.show(name)
-
-        # Idle display
         if not cur_N1 and not cur_N4:
             if debug_show_ok:
                 if novapi.timer() >= debug_show_speed_until:
@@ -1320,8 +1036,6 @@ while True:
                 pass
             else:
                 __led.show(DEBUG_ALL_NAMES[debug_motor_type][debug_motor_index])
-
-        # N1/N4: motor test
         servo_moved = False
         if debug_motor_type == 3:
             servo_moved = True
@@ -1345,24 +1059,20 @@ while True:
                     speed = -DEBUG_TEST_SPEED
             else:
                 speed = 0
-
-        # N2/N3: adjust speed/angle
         if cur_N2 and not last_N2:
             if debug_motor_type == 3:
-                DEBUG_SERVO_ANGLE = min(360, DEBUG_SERVO_ANGLE + 5)
+                DEBUG_SERVO_ANGLE = min(360, DEBUG_SERVO_ANGLE + 2)
                 debug_show_speed_until = novapi.timer() + 2.0
             else:
                 DEBUG_TEST_SPEED = min(100, DEBUG_TEST_SPEED + 10)
                 debug_show_speed_until = novapi.timer() + 2.0
         if cur_N3 and not last_N3:
             if debug_motor_type == 3:
-                DEBUG_SERVO_ANGLE = max(0, DEBUG_SERVO_ANGLE - 5)
+                DEBUG_SERVO_ANGLE = max(0, DEBUG_SERVO_ANGLE - 2)
                 debug_show_speed_until = novapi.timer() + 2.0
             else:
                 DEBUG_TEST_SPEED = max(0, DEBUG_TEST_SPEED - 10)
                 debug_show_speed_until = novapi.timer() + 2.0
-
-        # R1: set servo zero
         if debug_motor_type == 3 and cur_R1 and not last_R1 and _HAS_SERVO:
             try:
                 _sv = [__servo_1, __servo_2][debug_motor_index]
@@ -1373,12 +1083,17 @@ while True:
                 servo_moved = True
             except Exception:
                 pass
-
-        # L1: toggle servo direction
+        if debug_motor_type == 3 and cur_R2 and not last_R2 and _HAS_SERVO:
+            angle = servo_dir * DEBUG_SERVO_ANGLE
+            if debug_motor_index == 0:
+                SERVO1_ACTION_ANGLE = angle
+            else:
+                SERVO2_ACTION_ANGLE = angle
+            __led.show("A%d" % angle)
+            debug_show_speed_until = novapi.timer() + 1.0
+            servo_moved = True
         if debug_motor_type == 3 and cur_L1 and not last_L1:
             servo_dir = -servo_dir
-
-        # Output
         if debug_motor_type == 0:
             motor = [__motor_M1, __motor_M2, __motor_M3, __motor_M4, __motor_M5][debug_motor_index]
             motor.set_power(speed)
@@ -1388,8 +1103,6 @@ while True:
         elif debug_motor_type == 2:
             port = ["BL1", "BL2"][debug_motor_index]
             power_expand_board.set_power(port, speed)
-        # type 3 (servo) handled above via move_to, skip set_power
-
         last_Up = cur_Up
         last_Down = cur_Down
         last_Left = cur_Left
@@ -1399,19 +1112,14 @@ while True:
         last_N3 = cur_N3
         last_N4 = cur_N4
         last_Menu = cur_Menu
-
+        last_R1 = cur_R1
+        last_L1 = cur_L1
+        last_R2 = cur_R2
         time.sleep(LOOP_DELAY)
         continue
-
-    # ================================================================
-    #  Normal Mode (Remote Control)
-    # ================================================================
-    # --- 1. Read joysticks ---
     Lx = gamepad.get_joystick("Lx")
     Ly = gamepad.get_joystick("Ly")
     Rx = gamepad.get_joystick("Rx")
-
-    # --- 2. Read buttons ---
     cur_N1 = gamepad.is_key_pressed("N1")
     cur_N2 = gamepad.is_key_pressed("N2")
     cur_N3 = gamepad.is_key_pressed("N3")
@@ -1426,8 +1134,6 @@ while True:
     cur_Dpad_Down = gamepad.is_key_pressed("Down")
     cur_Dpad_Left = gamepad.is_key_pressed("Left")
     cur_Dpad_Right = gamepad.is_key_pressed("Right")
-
-    # D-pad 冲突保护：连续 3 次同时按下才拦截（避免单次信号抖动误杀）
     if cur_Dpad_Left and cur_Dpad_Right:
         _dpad_lr_conflict += 1
     else:
@@ -1435,7 +1141,6 @@ while True:
     if _dpad_lr_conflict >= 3:
         cur_Dpad_Left = False
         cur_Dpad_Right = False
-
     if cur_Dpad_Up and cur_Dpad_Down:
         _dpad_ud_conflict += 1
     else:
@@ -1443,8 +1148,6 @@ while True:
     if _dpad_ud_conflict >= 3:
         cur_Dpad_Up = False
         cur_Dpad_Down = False
-
-    # --- 3. Menu key: toggle debug mode ---
     if cur_Menu and not last_Menu:
         if debug_mode:
             debug_stop_motor()
@@ -1458,7 +1161,6 @@ while True:
             __led.show("Test")
             __led.show("M1")
         last_Menu = cur_Menu
-        # Reset all edge vars to prevent false triggers
         last_Up = last_Down = last_Left = last_Right = False
         last_N1 = last_N2 = last_N3 = last_N4 = False
         last_R2 = last_L1 = last_R1 = last_L2 = last_Plus = False
@@ -1466,10 +1168,6 @@ while True:
         _dpad_lr_conflict = _dpad_ud_conflict = 0
         time.sleep(0.3)
         continue
-
-    # --- 3b. Highest priority: encoder calibration readout ---
-    # After a GUI/built-in encoder calibration, N1-N4 must show M1-M4 deltas
-    # instead of triggering the normal servo/collector/roller functions.
     cal_key_handled = False
     if _debug_cal_done:
         if cur_N1 and not last_N1:
@@ -1484,7 +1182,6 @@ while True:
         if cur_N4 and not last_N4:
             _show_cal_delta(4, _cal_delta_M4)
             cal_key_handled = True
-
     if cal_key_handled:
         last_N1 = cur_N1
         last_N2 = cur_N2
@@ -1502,8 +1199,6 @@ while True:
         last_Plus = cur_Plus
         time.sleep(LOOP_DELAY)
         continue
-
-    # --- 4. D-pad ←: DC3 振荡 -100↔+100（按一下启动，再按停） ---
     if cur_Dpad_Left and not last_Dpad_Left:
         dc3_osc = not dc3_osc
         if dc3_osc:
@@ -1517,74 +1212,96 @@ while True:
         dc3_osc_dir = -dc3_osc_dir
         dc3_osc_timer = novapi.timer()
         power_expand_board.set_power(DC_COLLECTOR_PORT3, dc3_osc_dir * 100)
-
-    # D-pad ↑/↓: 无刷电机速度 ±5（范围 10~100）
+    BL_SPEED_PRESETS = [45, 50, 60]
     if cur_Dpad_Up and not last_Dpad_Up:
-        BL_ACTION_SPEED = min(100, BL_ACTION_SPEED + 5)
+        try:
+            idx = BL_SPEED_PRESETS.index(BL_ACTION_SPEED)
+            idx = (idx + 1) % len(BL_SPEED_PRESETS)
+        except ValueError:
+            idx = 0
+        BL_ACTION_SPEED = BL_SPEED_PRESETS[idx]
         if bl1_on:
             power_expand_board.set_power("BL1", BL_ACTION_SPEED)
+        if bl2_on:
             power_expand_board.set_power("BL2", BL_ACTION_SPEED)
         print(">>> D-pad↑: 无刷速度 = %d" % BL_ACTION_SPEED)
     if cur_Dpad_Down and not last_Dpad_Down:
-        BL_ACTION_SPEED = max(10, BL_ACTION_SPEED - 5)
+        try:
+            idx = BL_SPEED_PRESETS.index(BL_ACTION_SPEED)
+            idx = (idx - 1) % len(BL_SPEED_PRESETS)
+        except ValueError:
+            idx = 0
+        BL_ACTION_SPEED = BL_SPEED_PRESETS[idx]
         if bl1_on:
             power_expand_board.set_power("BL1", BL_ACTION_SPEED)
+        if bl2_on:
             power_expand_board.set_power("BL2", BL_ACTION_SPEED)
         print(">>> D-pad↓: 无刷速度 = %d" % BL_ACTION_SPEED)
-    # D-pad → 空
-
-    # --- 5. L1: 面翻转（正面↔反面）---
     if cur_L1 and not last_L1:
         face_flipped = not face_flipped
         if face_flipped:
             print(">>> L1: 面翻转 → 反面")
         else:
             print(">>> L1: 面翻转 → 正面")
-
-    # --- 6. R2: 双无刷 BL1+BL2 同时开关 ---
     if cur_R2 and not last_R2:
-        bl1_on = not bl1_on
-        bl2_on = not bl2_on
-        if bl1_on:
-            power_expand_board.set_power("BL1", BL_ACTION_SPEED)
-            power_expand_board.set_power("BL2", BL_ACTION_SPEED)
-            print(">>> R2: 双无刷启动 @%d" % BL_ACTION_SPEED)
-        else:
-            power_expand_board.stop("BL1")
+        if bl2_on:
+            bl2_on = False
             power_expand_board.stop("BL2")
-            print(">>> R2: 双无刷停止")
-    # R1 / L2 无效果
-
-    # --- 7. N-keys ---
-    # N1: 双舵机（仅在无刷已启动时有效）
+            print(">>> R2: BL2 停止")
+        else:
+            if bl1_on:
+                bl1_on = False
+                power_expand_board.stop("BL1")
+                print(">>> R2: 互斥关闭 BL1")
+            bl2_on = True
+            power_expand_board.set_power("BL2", BL_ACTION_SPEED)
+            print(">>> R2: BL2 启动 @%d" % BL_ACTION_SPEED)
+    if cur_L2 and not last_L2:
+        if bl1_on:
+            bl1_on = False
+            power_expand_board.stop("BL1")
+            print(">>> L2: BL1 停止")
+        else:
+            if bl2_on:
+                bl2_on = False
+                power_expand_board.stop("BL2")
+                print(">>> L2: 互斥关闭 BL2")
+            bl1_on = True
+            power_expand_board.set_power("BL1", BL_ACTION_SPEED)
+            print(">>> L2: BL1 启动 @%d" % BL_ACTION_SPEED)
     if cur_N1 and not last_N1:
         if not bl1_on and not bl2_on:
             print(">>> N1: 无刷未启动，舵机锁定")
             __led.show("LOCK")
-        elif _HAS_SERVO:
-            try:
-                __servo_1.move_to(SERVO1_ACTION_ANGLE, SERVO_ACTION_SPEED)
-                __servo_2.move_to(SERVO2_ACTION_ANGLE, SERVO_ACTION_SPEED)
-            except Exception:
-                pass
-            sv1_phase = 1; sv1_time = novapi.timer()
-            sv2_phase = 1; sv2_time = novapi.timer()
-            print(">>> N1: 双舵机触发")
-
-    # N2: M5=-100 + DC2=+100  切换（按一下开，再按关，与N4互斥）
+        elif bl1_on and not bl2_on:
+            if _HAS_SERVO:
+                try:
+                    __servo_2.move_to(SERVO2_ACTION_ANGLE, SERVO_ACTION_SPEED)
+                except Exception:
+                    pass
+                sv2_phase = 1; sv2_time = novapi.timer()
+                print(">>> N1: 2号舵机触发 (BL1关联)")
+        elif bl2_on and not bl1_on:
+            if _HAS_SERVO:
+                try:
+                    __servo_1.move_to(SERVO1_ACTION_ANGLE, SERVO_ACTION_SPEED)
+                except Exception:
+                    pass
+                sv1_phase = 1; sv1_time = novapi.timer()
+                print(">>> N1: 1号舵机触发 (BL2关联)")
     if cur_N2 and not last_N2:
         n2_on = not n2_on
         if n2_on:
             n4_on = False
             __motor_M5.set_power(-100)
+            power_expand_board.set_power(DC_COLLECTOR_PORT1, -100)
             power_expand_board.set_power(DC_COLLECTOR_PORT2, -100)
-            print(">>> N2: M5=-100  DC2=-100  开")
+            print(">>> N2: M5=-100  DC1=-100  DC2=-100  开")
         else:
             __motor_M5.set_power(0)
+            power_expand_board.set_power(DC_COLLECTOR_PORT1, 0)
             power_expand_board.set_power(DC_COLLECTOR_PORT2, 0)
             print(">>> N2: 关")
-
-    # N4: M5=+100 + DC2=-100  切换（按一下开，再按关，与N2互斥）
     if cur_N4 and not last_N4:
         n4_on = not n4_on
         if n4_on:
@@ -1596,12 +1313,6 @@ while True:
             __motor_M5.set_power(0)
             power_expand_board.set_power(DC_COLLECTOR_PORT2, 0)
             print(">>> N4: 关")
-
-    # N3: unused
-
-    # --- 8. Servo auto-close (SV1 + SV2, 由 N1 触发) ---
-
-    # Update normal-mode edge variables
     last_N1 = cur_N1
     last_N2 = cur_N2
     last_N3 = cur_N3
@@ -1615,8 +1326,6 @@ while True:
     last_Dpad_Down = cur_Dpad_Down
     last_Dpad_Left = cur_Dpad_Left
     last_Dpad_Right = cur_Dpad_Right
-
-    # --- 10. Servo auto-close (SV1) ---
     if sv1_phase == 1 and novapi.timer() - sv1_time >= SERVO_RETURN_DELAY:
         if _HAS_SERVO:
             try:
@@ -1624,8 +1333,6 @@ while True:
             except Exception:
                 pass
         sv1_phase = 0
-
-    # --- 11. Servo auto-close (SV2) ---
     if sv2_phase == 1 and novapi.timer() - sv2_time >= SERVO_RETURN_DELAY:
         if _HAS_SERVO:
             try:
@@ -1633,8 +1340,6 @@ while True:
             except Exception:
                 pass
         sv2_phase = 0
-
-    # --- 12. + key: start auto program ---
     if cur_Plus and not last_Plus:
         stop_all_motors()
         _reset_drive_encoder_reference("auto")
@@ -1644,12 +1349,10 @@ while True:
         auto_prev_Vx = 0.0
         auto_prev_Vy = 0.0
         auto_prev_omega = 0.0
-        # Clear old calibration data
         _debug_cal_done = False
         _enc_cal_auto_started = False
         _enc_step_initialized = -1
         _cal_delta_M1 = _cal_delta_M2 = _cal_delta_M3 = _cal_delta_M4 = None
-        # Print first step info
         first = AUTO_SEQUENCE[0]
         if isinstance(first[0], str):
             print(">>> 自动程序启动！步骤 1/%d: %s" %
@@ -1659,50 +1362,30 @@ while True:
             print(">>> 自动程序启动！步骤 1/%d: Vx=%d Vy=%d w=%d (%.1fs)" %
                   (len(AUTO_SEQUENCE), Vx0, Vy0, w0, d0))
     last_Plus = cur_Plus
-
-    # --- 13. Dead zone + response curve + speed scaling ---
-    Lx = apply_dead_zone(Lx)
-    Ly = apply_dead_zone(Ly)
-    Rx = apply_dead_zone(Rx)
-
-    # WPILib 风格指数曲线: 低速细腻、高速爆发
-    Lx = apply_response_curve(Lx, JOYSTICK_EXPO)
-    Ly = apply_response_curve(Ly, JOYSTICK_EXPO)
-    Rx = apply_response_curve(Rx, OMEGA_EXPO)
-
-    Vx = Lx * SPEED_SCALE
-    Vy = Ly * SPEED_SCALE
-    omega = Rx * SPEED_SCALE
-
-    # --- 14. Direction calibration ---
-    if INVERT_VX:
-        Vx = -Vx
-    if INVERT_VY:
-        Vy = -Vy
-    if INVERT_OMEGA:
-        omega = -omega
-
-    # --- 14b. Face flip: 反面时前后左右全部取反 ---
-    if face_flipped:
-        Vx = -Vx
-        Vy = -Vy
-
-    # --- 15. Kinematics ---
-    M1_power, M2_power, M3_power, M4_power = mecanum_kinematics(Vx, Vy, omega)
-
-    # --- 15b. 起步助推：0→非0 瞬间加力克服静摩擦 ---
-    M1_power, M2_power, M3_power, M4_power = startup_burst(
-        M1_power, M2_power, M3_power, M4_power, novapi.timer())
-
-    # --- 16. Output to chassis motors ---
-    __motor_M1.set_power(M1_power)
-    __motor_M2.set_power(M2_power)
-    __motor_M3.set_power(M3_power)
-    __motor_M4.set_power(M4_power)
-
-    # --- 17. LED display ---
+    if not auto_mode:
+        Lx = apply_dead_zone(Lx)
+        Ly = apply_dead_zone(Ly)
+        Rx = apply_dead_zone(Rx)
+        Lx = apply_response_curve(Lx)
+        Ly = apply_response_curve(Ly)
+        Rx = apply_response_curve(Rx)
+        Vx = Lx * SPEED_SCALE
+        Vy = Ly * SPEED_SCALE
+        omega = Rx * SPEED_SCALE
+        if INVERT_VX:
+            Vx = -Vx
+        if INVERT_VY:
+            Vy = -Vy
+        if INVERT_OMEGA:
+            omega = -omega
+        if face_flipped:
+            Vx = -Vx
+            Vy = -Vy
+        M1_power, M2_power, M3_power, M4_power = mecanum_kinematics(Vx, Vy, omega)
+        __motor_M1.set_power(M1_power)
+        __motor_M2.set_power(M2_power)
+        __motor_M3.set_power(M3_power)
+        __motor_M4.set_power(M4_power)
     if not (_debug_cal_done and novapi.timer() < _cal_display_until):
         __led.show("S%d" % BL_ACTION_SPEED)
-
-    # --- 18. Loop delay ---
     time.sleep(LOOP_DELAY)

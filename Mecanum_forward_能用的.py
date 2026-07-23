@@ -1,68 +1,3 @@
-"""
-三轮全向机器人 — 遥控操控程序
-================================
-描述：基于 Novapi 平台的三轮全向底盘遥控程序。
-      左摇杆控制全向移动（前进/后退/左右横移），
-      右摇杆左右控制原地自旋，
-      两个摇杆可同时操作实现复合运动（如边前进边转圈）。
-
-硬件需求：编码电机 ×3
-  - M1（前左轮）
-  - M2（前右轮）
-  - M3（尾部轮）
-
-操控速查：
-  ┌────────────┬──────────────────────┐
-  │  你想做的   │      手柄操作         │
-  ├────────────┼──────────────────────┤
-  │  前进后退   │  左摇杆 ↑↓           │
-  │  左右横移   │  左摇杆 ←→           │
-  │  原地左转   │  右摇杆 ←            │
-  │  原地右转   │  右摇杆 →            │
-  │  斜向移动   │  左摇杆 ↖↗↙↘        │
-  │  复合运动   │  两摇杆同时推         │
-  │  正面右切   │  按 R1（右转120°）   │
-  │  正面左切   │  按 L1（左转120°）   │
-  │  自动程序   │  按 +（加号键）      │
-  │  收球开关   │  按 N1（开/关切换）  │
-  │  调试开关   │  按 ≡（菜单键切换）  │
-  └────────────┴──────────────────────┘
-
-正面切换说明：
-  机器人有三个面（三角形三条边），默认 M1-M2 边为正面。
-  按 R1 → 正面顺时针切换（M1-M2 → M2-M3 → M3-M1 → M1-M2...）
-  按 L1 → 正面逆时针切换（M1-M2 → M3-M1 → M2-M3 → M1-M2...）
-  切换后摇杆方向会自动重新映射，保持操作直觉一致。
-
-自动程序说明：
-  按 + 键触发预设自动程序（运行期间遥操控被禁用，程序结束后自动恢复）。
-  自动程序通过步骤列表定义，每步指定：持续时间(秒) + 速度向量(Vx, Vy, ω)。
-  当前预设：前进 4 秒后停止。
-
-运动学模型：三轮全向 120° 对称布局
-===================================
-         前进方向 (+Vy)
-              ↑
-       M1 ←──┼──→ M2      (前左 M1, 前右 M2)
-              │
-              │
-             M3            (尾部 M3)
-
-  每个全向轮推力方向（正转时）：
-  - M1（θ=150°）：左前上方向
-  - M2（θ=30°）： 右前上方向
-  - M3（θ=270°）：正右方向
-
-  逆运动学方程（顺时针旋转为正）：
-    M1_power = -0.5·Vx - 0.866·Vy - ω
-    M2_power = -0.5·Vx + 0.866·Vy - ω
-    M3_power =  1.0·Vx            - ω
-
-  其中 Vx=横向速度(+右), Vy=纵向速度(+前), ω=旋转速度(+顺时针)
-
-  ⚠️ 实测修正：摇杆上推(Ly>0)时电机正转为后退，
-     故代码中 Vy = -Ly * SPEED_SCALE（取反修正）
-"""
 import novapi
 import time
 import math
@@ -71,280 +6,1018 @@ from mbuild import power_expand_board
 from mbuild.encoder_motor import encoder_motor_class
 from mbuild.led_matrix import led_matrix_class
 
-# ==================== 配置常量 ====================
-SPEED_SCALE = 0.6       # 全局速度倍率 (0~1)，安全起见默认 60%
-DEAD_ZONE = 8           # 摇杆死区阈值，小于此值的输入视为 0（防误触）
-LOOP_DELAY = 0.02       # 主循环周期（秒），20ms = 50Hz
-
-# 运动学系数（√3/2 ≈ 0.866）
+def _safe_print(msg=''):
+    pass
+print = _safe_print
+from mbuild.smartservo import smartservo_class
+_HAS_SERVO = True
+SPEED_SCALE = 0.85
+DEAD_ZONE = 3
+VY_BOOST = 1.4
+_LD = 0.02
+STICK_LOW_PIVOT = 25
+STICK_LOW_OUT = 18
+STICK_HIGH_EXPO = 1.7
 SQRT3_OVER_2 = 0.866
 HALF = 0.5
-
-# 自动程序配置
-AUTO_SPEED = 50            # 自动程序默认速度（0~100）
-AUTO_STEP_DELAY = 0.02     # 自动程序步骤循环周期（秒）
-
-# 收球直流电机配置
-DC_COLLECTOR_PORT = "DC1"  # 动力扩展板通道（1号口）
-DC_COLLECTOR_SPEED = 100   # 收球最大速度（正转收球）
-
-# 8x16 LED 点阵屏配置（横屏：16列 × 8行）
-LED_PORT = "PORT2"          # 点阵屏连接的 PORT 口（PORT1~PORT4）
-LED_INDEX = "INDEX1"        # 端口链上的序号
-
-# 调试模式配置
-DEBUG_TEST_SPEED = 50        # 调试模式中电机测试速度
-DEBUG_MOTOR_TYPES = ["编码电机", "直流电机"]       # 电机类型名称
-DEBUG_MOTOR_NAMES = ["M1", "M2", "M3"]            # 电机编号名称
-
-# 标定模式配置（调试模式下 L1+R1 进入）
-CAL_ANGLE_DEFAULT = 360      # 默认编码角度（度）
-CAL_ANGLE_STEP = 1000          # ↑↓ 每次调整步长
-CAL_ANGLE_COARSE = 1000       # ← → 粗调步长
-CAL_MOVE_SPEED = 50          # 标定移动最大转速（rpm）
-
-# S 曲线加速参数
-CAL_RAMP_UP = 0.2            # 加速段占比（sin 加速）
-CAL_RAMP_DOWN = 0.2          # 减速段占比（cos 减速）
-
-# 左右 PID 补偿参数
-CAL_PID_KP = 0.3             # 比例系数（左右进度差 → 速度修正）
-
-# 正面切换 — 旋转矩阵常量（cos/sin of ±120°）
+DC_COLLECTOR_PORT = 'DC1'
+DC_COLLECTOR_SPEED = -100
+BL_ACTION_SPEED = 80
+DEBUG_TEST_SPEED = 50
+DEBUG_MOTOR_TYPES = ['编码电机', '直流电机', '升降臂', '舵机', '无刷电机']
+DEBUG_MOTOR_NAMES = ['M1', 'M2', 'M3', 'M4', 'M5']
+DEBUG_DC_NAMES = ['DC1']
+DEBUG_BLDC_NAMES = ['BL1', 'BL2', 'BL12']
+DEBUG_LIFT_GEARS = [0, 315, 420, 480, 660, 1300]
+DEBUG_LIFT_NAMES = ['L0', 'L1', 'L2','L3','L4','L5']
+DEBUG_SERVO_NAMES = ['SV1', 'SV2']
+DEBUG_SERVO_ANGLE = 40
+SERVO_MAX_ANGLE = [355, 290, 290]
+SERVO_MOVE_SPEED = 30
+GRIP_CLOSE_POWER = -80
+GRIP_HOLD_POWER = -45
+GRIP_SPEED_THRESHOLD = 5
+GRIP_TIMEOUT = 5.0
+GRIP_SETTLE_TIME = 0.1
+LIFT_DIR = [1, -1]
+LIFT_ENCODER_SIGN = [1, -1]
+DEBUG_ALL_NAMES = [DEBUG_MOTOR_NAMES, DEBUG_DC_NAMES, DEBUG_LIFT_NAMES, DEBUG_SERVO_NAMES, DEBUG_BLDC_NAMES]
+LIFT_PID_KP = 0.5
+LIFT_PID_KI = 0.04
+LIFT_PID_KD = 0.02
+LIFT_MAX_SPEED = 100
+LIFT_MIN_SPEED = 38
+LIFT_MIN_SPEED_DOWN = 35
+LIFT_DEADBAND = 6
+LIFT_SETTLE_TIME = 0.1
+LIFT_TIMEOUT = 4.0
+LIFT_DECEL_ZONE = 0.25
+LIFT_DECEL_MAX_DEG = 400
+LIFT_STALL_DETECT_TIME = 0.18
+LIFT_STALL_MOVE_THR = 1.5
+LIFT_STALL_KICK_PWR = 80
+LIFT_STALL_KICK_DUR = 0.12
+LIFT_FINE_STEP = 30
+LIFT_HOMING_SPEED = -50
+LIFT_HOMING_STALL_TIME = 0.3
 COS120 = -0.5
-SIN120 = 0.866          # sin(120°) = √3/2
-
-# 三个正面的速度旋转预设（预计算避免循环中重复运算）
-# face_rotation[face] = (cos, -sin, sin, cos) → (Vx', Vy') = (cos*Vx - sin*Vy, sin*Vx + cos*Vy)
-FACE_ROTATIONS = [
-    (1.0,  0.0,  0.0,  1.0),   # Face 0: 0°   — M1-M2 边为正面（默认）
-    (COS120, -SIN120, SIN120, COS120),  # Face 1: +120° — M2-M3 边为正面（右切）
-    (COS120,  SIN120, -SIN120, COS120), # Face 2: -120° — M3-M1 边为正面（左切）
-]
-
-FACE_NAMES = [
-    "Face0: M1-M2 正面",
-    "Face1: M2-M3 正面",
-    "Face2: M3-M1 正面",
-]
-
-# ==================== 硬件初始化 ====================
-# M1: 前左轮（角度位置 150°）
-# M2: 前右轮（角度位置 30°）
-# M3: 尾部轮（角度位置 270° = -90°）
-__motor_M1 = encoder_motor_class("M1", "INDEX1")
-__motor_M2 = encoder_motor_class("M2", "INDEX1")
-__motor_M3 = encoder_motor_class("M3", "INDEX1")
-__led = led_matrix_class(LED_PORT, LED_INDEX)     # 8x16 点阵屏
-
-# ==================== 正面状态 ====================
-face = 0  # 当前正面: 0=M1-M2, 1=M2-M3, 2=M3-M1
-
-# ==================== 自动程序 ====================
-# 自动程序步骤列表：每步 = (持续时间_秒, Vx, Vy, omega)
-#   Vx: 横向速度 (+右)，Vy: 纵向速度 (+前)，omega: 旋转速度 (+顺时针)
-#   最后一个步骤建议设为 (0.1, 0, 0, 0) 作为停止缓冲
+SIN120 = 0.866
+FACE_ROTATIONS = [(-1.0, 0.0, 0.0, -1.0), (COS120, -SIN120, SIN120, COS120), (COS120, SIN120, -SIN120, COS120)]
+__led = led_matrix_class('PORT2', 'INDEX1')
+__motor_M1 = encoder_motor_class('M1', 'INDEX1')
+__motor_M2 = encoder_motor_class('M2', 'INDEX1')
+__motor_M3 = encoder_motor_class('M3', 'INDEX1')
+__motor_M4 = encoder_motor_class('M4', 'INDEX1')
+__motor_M5 = encoder_motor_class('M5', 'INDEX1')
+__servo_1 = smartservo_class('M6', 'INDEX1')
+__servo_2 = smartservo_class('M6', 'INDEX2')
+__servo_3 = smartservo_class('M6', 'INDEX3')
+face = 0
+ENCODER_TICKS_PER_CM = 23.4760
+_DEG_PER_CM = ENCODER_TICKS_PER_CM
+PROFILE_DEADBAND_DEG = 8
+_ENC_STEP_TIMEOUT = 8.0
+FACE_ROTATE_WHEEL_DEG = 940
+FACE_ROTATE_PID_KP = 0.2
+FACE_ROTATE_PID_KI = 0.001
+FACE_ROTATE_PID_KD = 0.02
+FACE_ROTATE_MAX_SPEED = 78
+FACE_ROTATE_MIN_SPEED = 12
+FACE_ROTATE_DEADBAND = 8
+FACE_ROTATE_TIMEOUT = 0.6
+FACE_ROTATE_SETTLE_TIME = 0.3
+FACE_ROTATE_DECEL_ZONE = 0.4
+FACE_SHOW_MS = 800
+ENC_RAMP_UP = 0.35
+ENC_RAMP_DOWN = 0.3
+ENC_MIN_POWER = 0.18
+FACE_DAMP = 0.15
+TURN_TICKS_PER_DEG = 27.7380
+_RPM_PER_POWER = 8.0
+FRONT_BACK_COMPENSATION = 0.0000
+OPEN_HEADING_KP = 0.8
+OPEN_HEADING_MAX_OMEGA = 20
 AUTO_SEQUENCE = [
-    (4.0,  0, AUTO_SPEED,  0),   # 步骤 0: 前进 4 秒
-    (0.1,  0,           0,  0),   # 步骤 1: 停止 (缓冲结束)
+    ('enc_move_s', 1737, -59, 19, 258, 282, 51),
+    ('enc_rot', 25131, 0, -65, 5686, 9015, 42),
+    ('enc_move_s', 1127, 30, 52, 376, 235, 50),
+    ('open_move', 600, 16, 29, 0),
+    ('grip', 'SV1', 1),
+    ('delay', 0.1),
+    ('lift_async', 1, 700),
+    ('delay', 0.5),
+    ('enc_move_s', 235, -32, -56, 141, 94, 60),
+    ('enc_rot', 23300, 0, -50, 5686, 9015, 45),
+    ('delay', 0.2),
+    ('enc_move_s', 315, -61, -35, 47, 70, 45),
+    ('open_move', 700, 30, -52, 0),
+    ('motor', 'M3', -30),
+    ('delay', 0.1),
+    ('motor', 'M3', 0),
+    ('grip', 'SV2', 1),
+    ('delay', 0.1),
+    ('lift_async', 0, 1300),
+    ('delay', 0.4),
+    ('enc_move_s', 704, -32, 56, 235, 117, 64),
+    ('enc_move_s', 822, 70, 0, 235, 141, 48),
+    ('lift', 1, 0),
+    ('grip', 'SV2', 0),
+    ('enc_stop', 0, 0, 0),
 ]
+auto_mode = False
+auto_step = 0
+_esi = -1
+_enc_step_start_time = 0.0
+_enc_targets = [0, 0, 0]
+_motors = None
+collector_on = False
+lift_gear = [0, 0]
+lift_fine_offset = [0, 0]
+bl1_on = False
+bl2_on = False
+_grip_active = [False, False, False]
+_grip_closing = [False, False, False]
+_grip_hold = [False, False, False]
+_grip_start_time = [0.0, 0.0, 0.0]
+_grip_settled = [False, False, False]
+_grip_last_print = [0.0, 0.0, 0.0]
+match_phase = 0
+_phase_sel = 0
+_face_lift_motor = [None, 1, 0]
+_face_grip_servo = [None, 0, 1]
+dc_out_on = False
+_lift_pid_active = [False, False]
+_lift_pid_target = [0.0, 0.0]
+_lift_pid_integral = [0.0, 0.0]
+_lift_pid_last_error = [0.0, 0.0]
+_lift_pid_last_time = [0.0, 0.0]
+_lift_pid_settle_start = [0.0, 0.0]
+_lift_pid_settled = [False, False]
+_lift_pid_start_time = [0.0, 0.0]
+_lift_zero_offset = [0.0, 0.0]
+_lift_homing = [False, False]
+_lift_homing_last_angle = [0.0, 0.0]
+_lift_homing_stall_start = [0.0, 0.0]
+_lift_stall_last_enc = [0.0, 0.0]
+_lift_stall_static_start = [0.0, 0.0]
+_lift_stall_kicking = [False, False]
+_lift_stall_kick_start = [0.0, 0.0]
+face_rotating = False
+face_rot_start_enc = [0, 0, 0]
+face_rot_target_deg = 0.0
+face_rot_pid_integral = 0.0
+face_rot_last_error = 0.0
+face_rot_last_time = 0.0
+face_rot_settle_start = 0.0
+face_rot_settled = False
+face_rot_start_time = 0.0
+face_show_until = 0.0
+debug_mode = False
+debug_motor_type = 0
+debug_motor_index = 0
+debug_lift_gear_index = 0
+servo_dir = -1
+_dpad_lr_conflict = 0
+_dpad_ud_conflict = 0
+_cal_delta_M1 = None
+_cal_delta_M2 = None
+_cal_delta_M3 = None
+_debug_cal_done = False
+_cal_display_until = 0.0
+_CAL_DISPLAY_HOLD_S = 4.0
 
-# 自动程序运行时状态
-auto_mode = False        # 当前是否在自动模式
-auto_step = 0            # 当前步骤索引
-auto_step_start = 0.0    # 当前步骤开始时间
+def apply_response_curve(value, max_input=100.0):
+    if value == 0:
+        return 0.0
+    sign = 1.0 if value > 0 else -1.0
+    x = abs(value)
+    if x <= STICK_LOW_PIVOT:
+        y = STICK_LOW_OUT * x / STICK_LOW_PIVOT
+    else:
+        t = (x - STICK_LOW_PIVOT) / (max_input - STICK_LOW_PIVOT)
+        y = STICK_LOW_OUT + (max_input - STICK_LOW_OUT) * t ** STICK_HIGH_EXPO
+    return sign * y
 
-# ==================== 收球开关状态 ====================
-collector_on = False     # 收球电机当前状态: False=关, True=开
-
-# ==================== 调试模式状态 ====================
-debug_mode = False            # 当前是否在调试模式（≡ 键切换）
-debug_motor_type = 0          # 0=编码电机, 1=直流电机
-debug_motor_index = 0         # 0=M1, 1=M2, 2=M3
-debug_cal_mode = False        # 是否在标定子模式
-debug_cal_angle = CAL_ANGLE_DEFAULT  # 当前标定编码角度（度）
-debug_cal_running = False     # 标定移动是否正在执行
-debug_cal_M1_start = 0.0      # M1 起始编码角
-debug_cal_M2_start = 0.0      # M2 起始编码角
-debug_cal_M1_target = 0.0     # M1 目标编码增量
-debug_cal_M2_target = 0.0     # M2 目标编码增量
-debug_cal_done_time = 0.0     # 标定完成时刻（显示最终值用）
-
-# ==================== 运动学函数 ====================
 def rotate_velocity(Vx, Vy, face_index):
-    """
-    根据当前正面，将摇杆速度向量旋转到对应坐标系
-
-    参数:
-        Vx, Vy: 摇杆原始速度（已缩放、取反）
-        face_index: 当前正面编号 (0/1/2)
-
-    返回:
-        (Vx', Vy'): 旋转后的速度向量
-    """
     c, ns, s, nc = FACE_ROTATIONS[face_index]
-    # Vx' = c*Vx + ns*Vy  (ns = -sinθ)
-    # Vy' = s*Vx + nc*Vy  (nc = cosθ)
-    return c * Vx + ns * Vy, s * Vx + nc * Vy
-
+    return (c * Vx + ns * Vy, s * Vx + nc * Vy)
 
 def omni_kinematics(Vx, Vy, omega):
-    """
-    三轮全向逆运动学计算
-
-    参数:
-        Vx  (float): 横向目标速度（+右, -左），范围 -100~100
-        Vy  (float): 纵向目标速度（+前, -后），范   围 -100~100
-                     注意：调用方需根据实际电机接线决定是否对 Vy 取反
-        omega (float): 旋转目标速度（+顺时针, -逆时针），范围 -100~100
-
-    返回:
-        tuple: (M1_power, M2_power, M3_power)，范围 -100~100
-    """
     M1 = -HALF * Vx - SQRT3_OVER_2 * Vy - omega
     M2 = -HALF * Vx + SQRT3_OVER_2 * Vy - omega
-    M3 =  Vx                            - omega
-
-    # 向量等比缩放：保持方向不变，速度等比降低
+    M3 = Vx - omega
     max_abs = max(abs(M1), abs(M2), abs(M3))
     if max_abs > 100:
         scale = 100.0 / max_abs
         M1 *= scale
         M2 *= scale
         M3 *= scale
-
-    return M1, M2, M3
-
+    return (M1, M2, M3)
 
 def apply_dead_zone(value, threshold=DEAD_ZONE):
-    """摇杆死区过滤：绝对值小于阈值的值置零"""
     if abs(value) < threshold:
         return 0
     return value
 
-
 def stop_all_motors():
-    """紧急停止所有电机"""
     __motor_M1.set_power(0)
     __motor_M2.set_power(0)
     __motor_M3.set_power(0)
-
+    __motor_M4.set_power(0)
+    __motor_M5.set_power(0)
+    power_expand_board.stop('BL1')
+    power_expand_board.stop('BL2')
 
 def debug_stop_motor():
-    """停止调试模式中当前选中的测试电机"""
-    if debug_motor_type == 0:  # 编码电机
-        motor = [__motor_M1, __motor_M2, __motor_M3][debug_motor_index]
+    if debug_motor_type == 0:
+        motor = [__motor_M1, __motor_M2, __motor_M3, __motor_M4, __motor_M5][debug_motor_index]
         motor.set_power(0)
-    else:  # 直流电机
+    elif debug_motor_type == 1:
         power_expand_board.set_power(DC_COLLECTOR_PORT, 0)
+    elif debug_motor_type == 2:
+        pass
+    elif debug_motor_type == 3:
+        if _HAS_SERVO:
+            servo = [__servo_1, __servo_2][debug_motor_index]
+            servo.set_power(0)
+    elif debug_motor_type == 4:
+        if debug_motor_index == 2:
+            power_expand_board.stop('BL1')
+            power_expand_board.stop('BL2')
+            power_expand_board.set_power(DC_COLLECTOR_PORT, 0)
+        else:
+            port = ['BL1', 'BL2'][debug_motor_index]
+            power_expand_board.stop(port)
 
+def _get_motors():
+    global _motors
+    if _motors is None:
+        _motors = [__motor_M1, __motor_M2, __motor_M3]
+    return _motors
 
-def debug_cal_start(angle):
-    """
-    启动标定移动：记录起始编码值并计算目标增量（非阻塞）
+def _read_motor_angles(motors):
+    vals = []
+    for m in motors:
+        try:
+            v = m.get_value('angle')
+            if v is None:
+                v = 0
+            vals.append(v)
+        except Exception:
+            vals.append(0)
+    return vals
 
-    运动学分配:
-        M1(前左): 反转 0.866*angle
-        M2(前右): 正转 0.866*angle
-        M3(尾部): 不动
-    """
-    global debug_cal_running, debug_cal_M1_start, debug_cal_M2_start
-    global debug_cal_M1_target, debug_cal_M2_target
+def _reset_drive_encoder_reference(reason='auto'):
+    motors = _get_motors()
+    for m in motors:
+        try:
+            m.set_power(0)
+        except Exception:
+            pass
+    time.sleep(0.05)
 
-    debug_cal_M1_start = __motor_M1.get_value("angle")
-    debug_cal_M2_start = __motor_M2.get_value("angle")
-    debug_cal_M1_target = -SQRT3_OVER_2 * angle
-    debug_cal_M2_target =  SQRT3_OVER_2 * angle
-    debug_cal_running = True
-
-    print(">>> 标定移动: M1=%.0f° M2=%.0f° M3=0° (max_speed=%d rpm)" %
-          (debug_cal_M1_target, debug_cal_M2_target, CAL_MOVE_SPEED))
-
-
-def debug_cal_tick():
-    """
-    标定移动单步更新（每循环调用一次，非阻塞）
-    返回: True=仍在运行, False=已完成
-    """
-    global debug_cal_running, debug_cal_done_time
-
-    # 读取当前编码位置
-    M1_cur = __motor_M1.get_value("angle") - debug_cal_M1_start
-    M2_cur = __motor_M2.get_value("angle") - debug_cal_M2_start
-
-    # 计算进度（0→1）
-    if abs(debug_cal_M1_target) > 0.1:
-        progress_M1 = abs(M1_cur / debug_cal_M1_target)
+def _show_cal_delta(motor_idx, value):
+    global _cal_display_until
+    if value is None:
+        __led.show('NONE')
     else:
-        progress_M1 = 1.0
+        delta = int(value)
+        __led.show('E%d' % delta)
+    _cal_display_until = novapi.timer() + _CAL_DISPLAY_HOLD_S
 
-    if abs(debug_cal_M2_target) > 0.1:
-        progress_M2 = abs(M2_cur / debug_cal_M2_target)
-    else:
-        progress_M2 = 1.0
+_em_start_angles = [0, 0, 0]
+_em_total_deg    = 1.0
+_em_wheel_powers = [0.0, 0.0, 0.0]
+_em_total_ticks  = 1
 
-    progress = min(progress_M1, progress_M2)
+def _enc_move_start(total_ticks, vy_power, vx_power=0):
+    global _enc_targets, _enc_step_start_time
+    global _em_start_angles, _em_total_deg, _em_wheel_powers, _em_total_ticks
+    motors = _get_motors()
+    if abs(vy_power) < 1 and abs(vx_power) < 1:
+        starts = _read_motor_angles(motors)
+        _enc_targets = [int(v) for v in starts]
+        _em_start_angles = [int(v) for v in starts]
+        _em_total_deg = 1.0
+        _em_total_ticks = 1
+        _enc_step_start_time = novapi.timer()
+        return
+    distance_cm = abs(total_ticks) / ENCODER_TICKS_PER_CM
+    total_degrees = distance_cm * ENCODER_TICKS_PER_CM
+    direction = 1 if total_ticks >= 0 else -1
+    vy_dir = vy_power * direction
+    vx_dir = vx_power * direction
+    M1p, M2p, M3p = omni_kinematics(vx_dir, vy_dir, 0)
+    wheel_powers = [M1p, M2p, M3p]
+    max_wheel_power = max(abs(M1p), abs(M2p), abs(M3p))
+    if max_wheel_power < 1:
+        starts = _read_motor_angles(motors)
+        _enc_targets = [int(v) for v in starts]
+        _em_start_angles = [int(v) for v in starts]
+        _em_total_deg = 1.0
+        _em_total_ticks = 1
+        _enc_step_start_time = novapi.timer()
+        return
+    vector_power = max((vx_power * vx_power + vy_power * vy_power) ** 0.5, 1)
+    _r1, _r2, _r3 = omni_kinematics(0, vector_power, 0)
+    ref_forward_power = max(abs(_r1), abs(_r2), abs(_r3), 1)
+    total_degrees *= max_wheel_power / ref_forward_power
+    scales = [abs(p) / max_wheel_power for p in wheel_powers]
+    signs = [1 if M1p >= 0 else -1, 1 if M2p >= 0 else -1, 1 if M3p >= 0 else -1]
+    starts = _read_motor_angles(motors)
+    wheel_degrees = [signs[i] * total_degrees * scales[i] for i in range(3)]
+    _enc_targets = [int(starts[i] + wheel_degrees[i]) for i in range(3)]
+    _em_start_angles = [int(v) for v in starts]
+    _em_total_deg = max(abs(wheel_degrees[0]), abs(wheel_degrees[1]), abs(wheel_degrees[2]), 1.0)
+    _em_wheel_powers = list(wheel_powers)
+    _em_total_ticks = max(abs(total_ticks), 1)
+    face_ratio = abs(vy_power) / max(abs(vx_power) + abs(vy_power), 1)
+    damp = ENC_MIN_POWER + FACE_DAMP * face_ratio
+    init_factor = max(ENC_MIN_POWER, damp)
+    for i in range(3):
+        try:
+            p = wheel_powers[i] * init_factor
+            if abs(p) < 1 and abs(wheel_degrees[i]) > 0.5:
+                p = 1.0 if wheel_powers[i] >= 0 else -1.0
+            motors[i].set_power(int(p))
+        except Exception:
+            pass
+    _enc_step_start_time = novapi.timer()
 
-    # 检查是否完成
-    if progress >= 0.995:
-        __motor_M1.set_power(0)
-        __motor_M2.set_power(0)
-        debug_cal_running = False
-        debug_cal_done_time = novapi.timer()
-        M1_final = __motor_M1.get_value("angle") - debug_cal_M1_start
-        M2_final = __motor_M2.get_value("angle") - debug_cal_M2_start
-        print(">>> 标定完成! M1实际=%.0f° M2实际=%.0f°" % (M1_final, M2_final))
-        __led.show("F%d" % int(abs(M2_final)))
-        return False
-
-    # ==== S 曲线速度因子 ====
-    if progress < CAL_RAMP_UP:
-        # sin 加速: 0.15 → 1（最低 15% 克服静摩擦）
-        factor = 0.15 + 0.85 * math.sin(progress / CAL_RAMP_UP * math.pi / 2.0)
-    elif progress < 1.0 - CAL_RAMP_DOWN:
-        # 匀速段
+def _enc_move_tick(max_power, stop_motors=True):
+    motors = _get_motors()
+    if novapi.timer() - _enc_step_start_time > _ENC_STEP_TIMEOUT:
+        if stop_motors:
+            for m in motors:
+                m.set_power(0)
+        return True
+    max_moved = 0.0
+    for i in range(3):
+        try:
+            cur = motors[i].get_value('angle')
+            if cur is None:
+                cur = _em_start_angles[i]
+            moved = abs(cur - _em_start_angles[i])
+            if moved > max_moved:
+                max_moved = moved
+        except Exception:
+            pass
+    progress = max_moved / _em_total_deg
+    if progress >= 1.0:
+        if stop_motors:
+            for m in motors:
+                m.set_power(0)
+        return True
+    all_done = True
+    for i in range(3):
+        try:
+            cur = motors[i].get_value('angle')
+            if cur is None:
+                cur = _em_start_angles[i]
+            if abs(_enc_targets[i] - cur) > PROFILE_DEADBAND_DEG:
+                all_done = False
+                break
+        except Exception:
+            pass
+    if all_done:
+        if stop_motors:
+            for m in motors:
+                m.set_power(0)
+        return True
+    ru = ENC_RAMP_UP
+    rd = ENC_RAMP_DOWN
+    mn = ENC_MIN_POWER
+    if progress < ru:
+        factor = mn + (1.0 - mn) * math.sin(progress / ru * math.pi / 2.0)
+    elif progress < 1.0 - rd:
         factor = 1.0
     else:
-        # cos 减速: 1 → 0.15
-        p_dec = (progress - (1.0 - CAL_RAMP_DOWN)) / CAL_RAMP_DOWN
-        factor = 0.15 + 0.85 * math.cos(p_dec * math.pi / 2.0)
+        p_dec = (progress - (1.0 - rd)) / rd
+        factor = mn + (1.0 - mn) * math.cos(p_dec * math.pi / 2.0)
+    factor = max(0.05, factor)
+    for i in range(3):
+        try:
+            cur = motors[i].get_value('angle')
+            if cur is None:
+                cur = _em_start_angles[i]
+            if abs(_enc_targets[i] - cur) <= PROFILE_DEADBAND_DEG:
+                motors[i].set_power(0)
+            else:
+                p = int(_em_wheel_powers[i] * factor)
+                if p == 0 and abs(_em_wheel_powers[i]) >= 1:
+                    p = 1 if _em_wheel_powers[i] > 0 else -1
+                motors[i].set_power(p)
+        except Exception:
+            pass
+    return False
 
-    base_speed = CAL_MOVE_SPEED * factor
+def _enc_rot_start(total_ticks, omega_power, accel_ticks=0, decel_ticks=0, min_pwr=18):
+    global _enc_targets, _enc_step_start_time
+    global _em_start_angles, _em_total_deg, _em_wheel_powers
+    global _enc_rot_accel_ticks, _enc_rot_decel_ticks, _enc_rot_min_pwr
+    global _enc_rot_omega_dir, _enc_rot_use_s
+    global _enc_s_start_angles, _enc_s_total_deg
+    motors = _get_motors()
+    total_degrees = abs(total_ticks) / TURN_TICKS_PER_DEG
+    w_dir = omega_power
+    M1p, M2p, M3p = omni_kinematics(0, 0, w_dir)
+    wheel_powers = [M1p, M2p, M3p]
+    signs = [1 if p >= 0 else -1 for p in wheel_powers]
+    starts = _read_motor_angles(motors)
+    wheel_degrees = [signs[i] * total_degrees for i in range(3)]
+    _enc_targets = [int(starts[i] + wheel_degrees[i]) for i in range(3)]
+    _em_start_angles = [int(v) for v in starts]
+    _em_total_deg = max(total_degrees, 1.0)
+    _em_wheel_powers = wheel_powers
+    _enc_rot_min_pwr     = max(0, min(min_pwr, 100))
+    _enc_rot_omega_dir   = w_dir
+    _enc_rot_use_s       = (accel_ticks > 0 or decel_ticks > 0)
+    _enc_s_start_angles  = [int(v) for v in starts]
+    _enc_s_total_deg     = max(abs(wheel_degrees[0]), abs(wheel_degrees[1]), abs(wheel_degrees[2]), 1.0)
+    total_rot_ticks = max(abs(total_ticks), 1)
+    _enc_rot_accel_ticks = max(0.0, min(accel_ticks / total_rot_ticks, 0.9))
+    _enc_rot_decel_ticks = max(0.0, min(decel_ticks / total_rot_ticks, 1.0 - _enc_rot_accel_ticks))
+    motor_rpm = max(30, int(abs(omega_power) * _RPM_PER_POWER))
+    init_f = (_enc_rot_min_pwr / 100.0) if _enc_rot_use_s else 1.0
+    for i in range(3):
+        try:
+            wd = int(wheel_degrees[i])
+            if _enc_rot_use_s:
+                p = int(wheel_powers[i] * init_f)
+                if abs(p) < 1 and abs(wd) > 0:
+                    p = 1 if wheel_powers[i] >= 0 else -1
+                motors[i].set_power(p)
+            else:
+                try:
+                    motors[i].move(wd, motor_rpm)
+                except Exception:
+                    motors[i].move(wd, 50)
+        except Exception:
+            pass
+    global _enc_rot_blend, _enc_rot_blend_t, _enc_s_vy, _enc_s_vx
+    _d = 1 if _enc_s_total_ticks >= 0 else -1
+    _b1, _b2, _b3 = omni_kinematics(_enc_s_vx * _d, _enc_s_vy * _d, 0)
+    _enc_rot_blend = [_b1 * 0.12, _b2 * 0.12, _b3 * 0.12]
+    _enc_rot_blend_t = novapi.timer()
+    _enc_s_vy = 0
+    _enc_s_vx = 0
+    _enc_step_start_time = novapi.timer()
 
-    # ==== 左右 PID 补偿 ====
-    error = progress_M1 - progress_M2   # M1超前 → 正值 → 减速M1加速M2
-    correction = CAL_PID_KP * error * CAL_MOVE_SPEED
+def _enc_rot_s_tick():
+    motors = _get_motors()
+    if novapi.timer() - _enc_step_start_time > _ENC_STEP_TIMEOUT:
+        for m in motors:
+            m.set_power(0)
+        return True
+    max_moved = 0.0
+    for i in range(3):
+        try:
+            cur = motors[i].get_value('angle')
+            if cur is None:
+                cur = _enc_s_start_angles[i]
+            moved = abs(cur - _enc_s_start_angles[i])
+            if moved > max_moved:
+                max_moved = moved
+        except Exception:
+            pass
+    progress = max_moved / _enc_s_total_deg
+    if progress >= 1.0:
+        for m in motors:
+            m.set_power(0)
+        return True
+    mn  = _enc_rot_min_pwr / 100.0
+    accel_end = _enc_rot_accel_ticks
+    decel_beg = 1.0 - _enc_rot_decel_ticks
+    if accel_end > 0 and progress < accel_end:
+        factor = mn + (1.0 - mn) * _smoothstep(progress / accel_end)
+    elif _enc_rot_decel_ticks > 0 and progress > decel_beg:
+        t      = (1.0 - progress) / max(1.0 - decel_beg, 0.001)
+        factor = max((1.0 - mn) * _smoothstep(t), 0.05)
+    else:
+        factor = 1.0
+    M1p, M2p, M3p = omni_kinematics(0, 0, _enc_rot_omega_dir)
+    wp = [M1p, M2p, M3p]
+    dc = max(0.0, 1.0 - (novapi.timer() - _enc_rot_blend_t) * 8.33)
+    for i in range(3):
+        try:
+            cur = motors[i].get_value('angle')
+            if cur is None:
+                cur = _enc_s_start_angles[i]
+            if abs(_enc_targets[i] - cur) <= PROFILE_DEADBAND_DEG:
+                motors[i].set_power(0)
+            else:
+                motors[i].set_power(int(wp[i] * factor + _enc_rot_blend[i] * dc))
+        except Exception:
+            pass
+    return False
 
-    M1_speed = base_speed - correction
-    M2_speed = base_speed + correction
+def _enc_rot_tick(max_power, stop_motors=True):
+    if _enc_rot_use_s:
+        return _enc_rot_s_tick()
+    return _enc_move_tick(max_power, stop_motors=stop_motors)
 
-    # 限幅并确定方向
-    M1_power = max(-100, min(100, M1_speed if debug_cal_M1_target > 0 else -M1_speed))
-    M2_power = max(-100, min(100, M2_speed if debug_cal_M2_target > 0 else -M2_speed))
+_mr_move_targets = [0, 0, 0]
+_mr_rot_targets  = [0, 0, 0]
+_mr_move_done    = False
+_mr_rot_done     = False
 
-    # 最低速度兜底（避免完全停转，15% 克服静摩擦）
-    if abs(M1_power) < 15 and progress < 0.9:
-        M1_power = 15 if debug_cal_M1_target > 0 else -15
-    if abs(M2_power) < 15 and progress < 0.9:
-        M2_power = 15 if debug_cal_M2_target > 0 else -15
+def _enc_moverot_start(total_ticks, vy_power, vx_power, omega_power, rot_ticks,
+                       accel_ticks=0, decel_ticks=0, min_pwr=18):
+    global _mr_move_targets, _mr_rot_targets, _mr_move_done, _mr_rot_done
+    global _enc_step_start_time
+    motors = _get_motors()
+    starts = _read_motor_angles(motors)
+    move_deg = [0.0, 0.0, 0.0]
+    if abs(vy_power) >= 1 or abs(vx_power) >= 1:
+        dist_cm = abs(total_ticks) / ENCODER_TICKS_PER_CM
+        total_d = dist_cm * _DEG_PER_CM
+        direction = 1 if total_ticks >= 0 else -1
+        M1p, M2p, M3p = omni_kinematics(vx_power * direction, vy_power * direction, 0)
+        wheel_powers = [M1p, M2p, M3p]
+        max_wp = max(abs(M1p), abs(M2p), abs(M3p))
+        if max_wp >= 1:
+            scales = [abs(p) / max_wp for p in wheel_powers]
+            signs  = [1 if p >= 0 else -1 for p in wheel_powers]
+            move_deg = [signs[i] * total_d * scales[i] for i in range(3)]
+    rot_deg = [0.0, 0.0, 0.0]
+    if abs(omega_power) >= 1:
+        rot_dist_cm = abs(rot_ticks) / TURN_TICKS_PER_DEG
+        rot_dir = 1 if rot_ticks >= 0 else -1
+        R1, R2, R3 = omni_kinematics(0, 0, abs(omega_power) * rot_dir)
+        rsigns = [1 if p >= 0 else -1 for p in (R1, R2, R3)]
+        rot_deg = [rsigns[i] * rot_dist_cm for i in range(3)]
+    _mr_move_targets = [int(starts[i] + move_deg[i]) for i in range(3)]
+    _mr_rot_targets  = [int(starts[i] + rot_deg[i])  for i in range(3)]
+    _mr_move_done    = (max(abs(move_deg[0]), abs(move_deg[1]), abs(move_deg[2])) < 0.5)
+    _mr_rot_done     = (max(abs(rot_deg[0]),  abs(rot_deg[1]),  abs(rot_deg[2]))  < 0.5)
+    max_pwr = max(abs(vy_power), abs(vx_power), abs(omega_power))
+    motor_rpm = max(30, int(max_pwr * _RPM_PER_POWER))
+    for i in range(3):
+        combined = move_deg[i] + rot_deg[i]
+        try:
+            if abs(combined) > 0.5:
+                try:
+                    motors[i].move(int(combined), motor_rpm)
+                except Exception:
+                    motors[i].move(int(combined), 50)
+        except Exception:
+            pass
+    _enc_step_start_time = novapi.timer()
 
-    __motor_M1.set_power(M1_power)
-    __motor_M2.set_power(M2_power)
+def _enc_moverot_tick(stop_motors=True):
+    motors = _get_motors()
+    if novapi.timer() - _enc_step_start_time > _ENC_STEP_TIMEOUT:
+        if stop_motors:
+            for m in motors:
+                m.set_power(0)
+        return True
+    all_done = True
+    for i in range(3):
+        try:
+            cur = motors[i].get_value('angle')
+            if cur is None:
+                cur = 0
+            if not _mr_move_done and abs(_mr_move_targets[i] - cur) > PROFILE_DEADBAND_DEG:
+                all_done = False
+                break
+            if not _mr_rot_done and abs(_mr_rot_targets[i] - cur) > PROFILE_DEADBAND_DEG:
+                all_done = False
+                break
+        except Exception:
+            pass
+    if all_done:
+        if stop_motors:
+            for m in motors:
+                m.set_power(0)
+        return True
+    return False
 
-    # 显示屏实时刷新当前编码值（M2 为参考）
-    __led.show("E%d" % int(abs(M2_cur)))
+_open_move_duration_ms = 0
+_open_move_heading_ref = 0.0
+_open_move_vy = 0
+_open_move_vx = 0
+_open_move_omega_base = 0
 
-    return True
+def _open_move_start(duration_ms, vy_power, vx_power, omega_power):
+    global _open_move_duration_ms, _enc_step_start_time
+    global _open_move_heading_ref, _open_move_vy, _open_move_vx, _open_move_omega_base
+    motors = _get_motors()
+    _open_move_duration_ms = duration_ms
+    _open_move_vy = vy_power
+    _open_move_vx = vx_power
+    _open_move_omega_base = omega_power
+    try:
+        _open_move_heading_ref = (motors[0].get_value('angle') + motors[1].get_value('angle') + motors[2].get_value('angle'))
+    except Exception:
+        _open_move_heading_ref = 0.0
+    M1p, M2p, M3p = omni_kinematics(vx_power, vy_power, omega_power)
+    try:
+        motors[0].set_power(int(M1p))
+        motors[1].set_power(int(M2p))
+        motors[2].set_power(int(M3p))
+    except Exception:
+        pass
+    _enc_step_start_time = novapi.timer()
 
+def _open_move_tick():
+    if novapi.timer() - _enc_step_start_time >= _open_move_duration_ms / 1000.0:
+        motors = _get_motors()
+        for m in motors:
+            m.set_power(0)
+        return True
+    motors = _get_motors()
+    try:
+        s = motors[0].get_value('angle') + motors[1].get_value('angle') + motors[2].get_value('angle')
+        c = max(-OPEN_HEADING_MAX_OMEGA, min(OPEN_HEADING_MAX_OMEGA,
+                OPEN_HEADING_KP * (s - _open_move_heading_ref) / (3.0 * TURN_TICKS_PER_DEG)))
+        M1p, M2p, M3p = omni_kinematics(_open_move_vx, _open_move_vy, _open_move_omega_base + c)
+        motors[0].set_power(int(M1p))
+        motors[1].set_power(int(M2p))
+        motors[2].set_power(int(M3p))
+    except Exception:
+        pass
+    return False
 
-# ==================== 边沿触发辅助变量 ====================
+_enc_s_total_ticks  = 0
+_enc_s_accel_ticks  = 0
+_enc_s_decel_ticks  = 0
+_enc_s_min_pwr      = 30
+_enc_s_vy           = 0
+_enc_s_vx           = 0
+_enc_s_start_angles = [0, 0, 0]
+_enc_s_total_deg    = 0.0
+_enc_rot_accel_ticks = 0
+_enc_rot_decel_ticks = 0
+_enc_rot_min_pwr     = 18
+_enc_rot_omega_dir   = 0
+_enc_rot_use_s       = False
+_enc_rot_blend       = [0.0, 0.0, 0.0]
+_enc_rot_blend_t     = 0.0
+
+def _smoothstep(t):
+    if t <= 0:
+        return 0.0
+    if t >= 1:
+        return 1.0
+    return t * t * (3.0 - 2.0 * t)
+
+def _enc_move_s_start(total_ticks, vy_power, vx_power, accel_ticks, decel_ticks, min_pwr):
+    global _enc_s_total_ticks, _enc_s_accel_ticks, _enc_s_decel_ticks
+    global _enc_s_min_pwr, _enc_s_vy, _enc_s_vx
+    global _enc_s_start_angles, _enc_s_total_deg
+    global _enc_step_start_time, _enc_targets
+    motors = _get_motors()
+    _enc_s_total_ticks  = total_ticks
+    _enc_s_accel_ticks  = max(0, accel_ticks)
+    _enc_s_decel_ticks  = max(0, decel_ticks)
+    _enc_s_min_pwr      = max(0, min(min_pwr, 100))
+    _enc_s_vy           = vy_power
+    _enc_s_vx           = vx_power
+    distance_cm   = abs(total_ticks) / ENCODER_TICKS_PER_CM
+    total_degrees = distance_cm * ENCODER_TICKS_PER_CM
+    direction = 1 if total_ticks >= 0 else -1
+    vy_dir = vy_power * direction
+    vx_dir = vx_power * direction
+    M1p, M2p, M3p = omni_kinematics(vx_dir, vy_dir, 0)
+    wheel_powers  = [M1p, M2p, M3p]
+    max_wp = max(abs(M1p), abs(M2p), abs(M3p), 1)
+    scales  = [abs(p) / max_wp for p in wheel_powers]
+    signs   = [1 if M1p >= 0 else -1, 1 if M2p >= 0 else -1, 1 if M3p >= 0 else -1]
+    starts  = _read_motor_angles(motors)
+    wheel_deg = [signs[i] * total_degrees * scales[i] for i in range(3)]
+    _enc_s_total_deg    = max(abs(wheel_deg[0]), abs(wheel_deg[1]), abs(wheel_deg[2]), 1.0)
+    _enc_s_start_angles = [int(starts[i]) for i in range(3)]
+    _enc_targets[:3]    = [int(starts[i] + wheel_deg[i]) for i in range(3)]
+    init_f = _enc_s_min_pwr / 100.0
+    for i in range(3):
+        try:
+            p = wheel_powers[i] * init_f
+            if abs(p) < 1 and abs(wheel_deg[i]) > 0.5:
+                p = 1.0 if wheel_powers[i] >= 0 else -1.0
+            motors[i].set_power(int(p))
+        except Exception:
+            pass
+    _enc_step_start_time = novapi.timer()
+
+def _enc_move_s_tick():
+    motors = _get_motors()
+    if novapi.timer() - _enc_step_start_time > _ENC_STEP_TIMEOUT:
+        for m in motors:
+            m.set_power(0)
+        return True
+    max_moved = 0.0
+    for i in range(3):
+        try:
+            cur = motors[i].get_value('angle')
+            if cur is None:
+                cur = _enc_s_start_angles[i]
+            moved = abs(cur - _enc_s_start_angles[i])
+            if moved > max_moved:
+                max_moved = moved
+        except Exception:
+            pass
+    progress = max_moved / _enc_s_total_deg
+    if progress >= 1.0:
+        for m in motors:
+            m.set_power(0)
+        return True
+    ticks_done = int(progress * _enc_s_total_ticks)
+    total = max(_enc_s_total_ticks, 1)
+    at    = _enc_s_accel_ticks
+    dt    = _enc_s_decel_ticks
+    min_f = _enc_s_min_pwr / 100.0
+    if at > 0 and ticks_done < at:
+        factor = min_f + (1.0 - min_f) * _smoothstep(ticks_done / at)
+    elif dt > 0 and ticks_done > (total - dt):
+        t      = (total - ticks_done) / dt
+        factor = max((1.0 - min_f) * _smoothstep(t), 0.05)
+    else:
+        factor = 1.0
+    direction = 1 if _enc_s_total_ticks >= 0 else -1
+    M1p, M2p, M3p = omni_kinematics(_enc_s_vx * direction, _enc_s_vy * direction, 0)
+    wheel_powers = [M1p, M2p, M3p]
+    for i in range(3):
+        try:
+            cur = motors[i].get_value('angle')
+            if cur is None:
+                cur = _enc_s_start_angles[i]
+            if abs(_enc_targets[i] - cur) <= PROFILE_DEADBAND_DEG:
+                motors[i].set_power(0)
+            else:
+                motors[i].set_power(int(wheel_powers[i] * factor))
+        except Exception:
+            pass
+    return False
+
+def face_rotate_start():
+    global face_rotating, face_rot_start_enc, face_rot_target_deg
+    global face_rot_pid_integral, face_rot_last_error, face_rot_last_time
+    global face_rot_settle_start, face_rot_settled, face_rot_start_time
+    face_rot_start_enc = [__motor_M1.get_value('angle'), __motor_M2.get_value('angle'), __motor_M3.get_value('angle')]
+    face_rot_target_deg = FACE_ROTATE_WHEEL_DEG
+    face_rot_pid_integral = 0.0
+    face_rot_last_error = 0.0
+    face_rot_last_time = novapi.timer()
+    face_rot_settle_start = 0.0
+    face_rot_settled = False
+    face_rot_start_time = novapi.timer()
+    face_rotating = True
+
+def face_rotate_tick():
+    global face_rotating, face_rot_pid_integral, face_rot_last_error
+    global face_rot_last_time, face_rot_settle_start, face_rot_settled
+    now = novapi.timer()
+    if now - face_rot_start_time > FACE_ROTATE_TIMEOUT:
+        stop_all_motors()
+        face_rotating = False
+        return True
+    M1_delta = abs(__motor_M1.get_value('angle') - face_rot_start_enc[0])
+    M2_delta = abs(__motor_M2.get_value('angle') - face_rot_start_enc[1])
+    M3_delta = abs(__motor_M3.get_value('angle') - face_rot_start_enc[2])
+    avg_delta = (M1_delta + M2_delta + M3_delta) / 3.0
+    error = face_rot_target_deg - avg_delta
+    if abs(error) <= FACE_ROTATE_DEADBAND:
+        if not face_rot_settled:
+            face_rot_settled = True
+            face_rot_settle_start = now
+        elif now - face_rot_settle_start >= FACE_ROTATE_SETTLE_TIME:
+            stop_all_motors()
+            face_rotating = False
+            return True
+        stop_all_motors()
+        face_rot_pid_integral = 0.0
+        face_rot_last_error = 0.0
+        return False
+    else:
+        face_rot_settled = False
+        face_rot_settle_start = 0.0
+    dt = now - face_rot_last_time
+    if dt <= 0:
+        dt = _LD
+    face_rot_last_time = now
+    if FACE_ROTATE_PID_KI > 0:
+        face_rot_pid_integral += error * dt
+        max_integral = FACE_ROTATE_MAX_SPEED / FACE_ROTATE_PID_KI
+        face_rot_pid_integral = max(-max_integral, min(max_integral, face_rot_pid_integral))
+    derivative = (error - face_rot_last_error) / dt if dt > 0 else 0
+    face_rot_last_error = error
+    omega = FACE_ROTATE_PID_KP * error + FACE_ROTATE_PID_KI * face_rot_pid_integral + FACE_ROTATE_PID_KD * derivative
+    decel_threshold = face_rot_target_deg * FACE_ROTATE_DECEL_ZONE
+    if 0 < error < decel_threshold:
+        decel_progress = 1.0 - error / decel_threshold
+        speed_limit = FACE_ROTATE_MIN_SPEED + (FACE_ROTATE_MAX_SPEED - FACE_ROTATE_MIN_SPEED) * math.cos(decel_progress * math.pi / 2.0)
+        omega = max(-speed_limit, min(speed_limit, omega))
+    omega = max(-FACE_ROTATE_MAX_SPEED, min(FACE_ROTATE_MAX_SPEED, omega))
+    if abs(omega) < FACE_ROTATE_MIN_SPEED and abs(error) > FACE_ROTATE_DEADBAND:
+        omega = FACE_ROTATE_MIN_SPEED if error > 0 else -FACE_ROTATE_MIN_SPEED
+    omega = -omega
+    M1p, M2p, M3p = omni_kinematics(0, 0, omega)
+    __motor_M1.set_power(M1p)
+    __motor_M2.set_power(M2p)
+    __motor_M3.set_power(M3p)
+    return False
+_LIFT_MOTORS = [None, None]
+
+def _init_lift_motors():
+    global _LIFT_MOTORS
+    if _LIFT_MOTORS[0] is None:
+        _LIFT_MOTORS = [__motor_M4, __motor_M5]
+
+def _apply_match_phase():
+    
+    global _face_lift_motor, _face_grip_servo, match_phase
+    global _grip_active, _grip_closing, _grip_hold
+    if match_phase == 0:
+        _face_lift_motor = [None, 1, 0]
+        _face_grip_servo = [None, 0, 1]
+    else:
+        _face_lift_motor = [None, None, 0]
+        _face_grip_servo = [None, 2,    1]
+        _init_lift_motors()
+        top_deg = DEBUG_LIFT_GEARS[-1] if DEBUG_LIFT_GEARS else 600
+        lift_pid_start(0, top_deg)
+
+def lift_pid_start(motor_idx, target_deg):
+    global _lift_pid_active, _lift_pid_target
+    global _lift_pid_integral, _lift_pid_last_error, _lift_pid_last_time
+    global _lift_pid_settle_start, _lift_pid_settled, _lift_pid_start_time
+    global _lift_stall_last_enc, _lift_stall_static_start, _lift_stall_kicking, _lift_stall_kick_start
+    _init_lift_motors()
+    if _LIFT_MOTORS[motor_idx] is None:
+        _lift_pid_active[motor_idx] = False
+        __led.show('noM')
+        return
+    old_target = _lift_pid_target[motor_idx]
+    _lift_pid_target[motor_idx] = target_deg
+    new_dir = target_deg - old_target
+    if new_dir * _lift_pid_integral[motor_idx] < 0:
+        _lift_pid_integral[motor_idx] = 0.0
+    _lift_pid_last_error[motor_idx] = 0.0
+    _lift_pid_last_time[motor_idx] = novapi.timer()
+    _lift_pid_settle_start[motor_idx] = 0.0
+    _lift_pid_settled[motor_idx] = False
+    _lift_pid_start_time[motor_idx] = novapi.timer()
+    _lift_stall_last_enc[motor_idx] = _LIFT_MOTORS[motor_idx].get_value('angle')
+    _lift_stall_static_start[motor_idx] = novapi.timer()
+    _lift_stall_kicking[motor_idx] = False
+    _lift_stall_kick_start[motor_idx] = 0.0
+    _lift_pid_active[motor_idx] = True
+
+def lift_pid_tick(motor_idx):
+    global _lift_pid_integral, _lift_pid_last_error, _lift_pid_last_time
+    global _lift_pid_settle_start, _lift_pid_settled, _lift_pid_active
+    global _lift_stall_last_enc, _lift_stall_static_start, _lift_stall_kicking, _lift_stall_kick_start
+    _init_lift_motors()
+    motor = _LIFT_MOTORS[motor_idx]
+    if motor is None:
+        _lift_pid_active[motor_idx] = False
+        return True
+    if not _lift_pid_active[motor_idx]:
+        return True
+    now = novapi.timer()
+    if now - _lift_pid_start_time[motor_idx] > LIFT_TIMEOUT:
+        motor.set_power(0)
+        _lift_pid_active[motor_idx] = False
+        return True
+    cur_deg = motor.get_value('angle') * LIFT_ENCODER_SIGN[motor_idx] - _lift_zero_offset[motor_idx]
+    error = _lift_pid_target[motor_idx] - cur_deg
+    if abs(error) <= LIFT_DEADBAND:
+        if not _lift_pid_settled[motor_idx]:
+            _lift_pid_settled[motor_idx] = True
+            _lift_pid_settle_start[motor_idx] = now
+        elif now - _lift_pid_settle_start[motor_idx] >= LIFT_SETTLE_TIME:
+            motor.set_power(0)
+            _lift_pid_active[motor_idx] = False
+            _lift_pid_settled[motor_idx] = False
+            return True
+        motor.set_power(0)
+        _lift_pid_integral[motor_idx] = 0.0
+        _lift_pid_last_error[motor_idx] = 0.0
+        return False
+    else:
+        _lift_pid_settled[motor_idx] = False
+        _lift_pid_settle_start[motor_idx] = 0.0
+    dt = now - _lift_pid_last_time[motor_idx]
+    if dt <= 0:
+        dt = _LD
+    _lift_pid_last_time[motor_idx] = now
+    if LIFT_PID_KI > 0:
+        _lift_pid_integral[motor_idx] += error * dt
+        max_integral = LIFT_MAX_SPEED / LIFT_PID_KI
+        _lift_pid_integral[motor_idx] = max(-max_integral, min(max_integral, _lift_pid_integral[motor_idx]))
+    derivative = (error - _lift_pid_last_error[motor_idx]) / dt if dt > 0 else 0
+    _lift_pid_last_error[motor_idx] = error
+    power = LIFT_PID_KP * error + LIFT_PID_KI * _lift_pid_integral[motor_idx] + LIFT_PID_KD * derivative
+    eff_min_speed = LIFT_MIN_SPEED if error > 0 else LIFT_MIN_SPEED_DOWN
+    decel_threshold = min(max(abs(_lift_pid_target[motor_idx]) * LIFT_DECEL_ZONE, LIFT_DEADBAND * 4), LIFT_DECEL_MAX_DEG)
+    if abs(error) < decel_threshold:
+        decel_progress = 1.0 - abs(error) / max(decel_threshold, 1.0)
+        speed_limit = eff_min_speed + (LIFT_MAX_SPEED - eff_min_speed) * math.cos(decel_progress * math.pi / 2.0)
+        power = max(-speed_limit, min(speed_limit, power))
+    power = max(-LIFT_MAX_SPEED, min(LIFT_MAX_SPEED, power))
+    if abs(power) < eff_min_speed and abs(error) > LIFT_DEADBAND:
+        power = eff_min_speed if error > 0 else -eff_min_speed
+    raw_enc = motor.get_value('angle')
+    enc_moved = abs(raw_enc - _lift_stall_last_enc[motor_idx])
+    if enc_moved > LIFT_STALL_MOVE_THR:
+        _lift_stall_last_enc[motor_idx] = raw_enc
+        _lift_stall_static_start[motor_idx] = now
+        _lift_stall_kicking[motor_idx] = False
+    if _lift_stall_kicking[motor_idx]:
+        if now - _lift_stall_kick_start[motor_idx] < LIFT_STALL_KICK_DUR:
+            power = LIFT_STALL_KICK_PWR if error > 0 else -LIFT_STALL_KICK_PWR
+        else:
+            _lift_stall_kicking[motor_idx] = False
+            _lift_stall_last_enc[motor_idx] = raw_enc
+            _lift_stall_static_start[motor_idx] = now
+    elif abs(error) > LIFT_DEADBAND:
+        if now - _lift_stall_static_start[motor_idx] > LIFT_STALL_DETECT_TIME:
+            _lift_stall_kicking[motor_idx] = True
+            _lift_stall_kick_start[motor_idx] = now
+    power *= LIFT_DIR[motor_idx]
+    motor.set_power(power)
+    return False
+
+def lift_pid_tick_all():
+    lift_pid_tick(0)
+    lift_pid_tick(1)
+
+def _grip_tick_all():
+    if not (_grip_closing[0] or _grip_closing[1] or _grip_closing[2]):
+        return
+    for sv_idx in range(3):
+        if not _grip_closing[sv_idx] or not _HAS_SERVO:
+            continue
+        try:
+            sv = [__servo_1, __servo_2, __servo_3][sv_idx]
+            angle = sv.get_value('angle')
+            speed = sv.get_value('speed')
+            now = novapi.timer()
+            elapsed = now - _grip_start_time[sv_idx]
+            if abs(angle) >= SERVO_MAX_ANGLE[sv_idx]:
+                sv.set_power(0)
+                _grip_closing[sv_idx] = False
+            elif not _grip_settled[sv_idx]:
+                if elapsed >= GRIP_SETTLE_TIME:
+                    _grip_settled[sv_idx] = True
+            else:
+                if abs(speed) < GRIP_SPEED_THRESHOLD:
+                    sv.set_power(GRIP_HOLD_POWER)
+                    _grip_closing[sv_idx] = False
+                    _grip_hold[sv_idx] = True
+                elif elapsed > GRIP_TIMEOUT:
+                    sv.set_power(0)
+                    _grip_closing[sv_idx] = False
+        except Exception:
+            pass
+
+def _lift_homing_tick(motor_idx):
+    global _lift_homing, _lift_homing_last_angle, _lift_homing_stall_start, _lift_zero_offset
+    global _lift_pid_active, lift_gear, lift_fine_offset
+    _init_lift_motors()
+    motor = _LIFT_MOTORS[motor_idx]
+    if motor is None:
+        _lift_homing[motor_idx] = False
+        return
+    if not _lift_homing[motor_idx]:
+        return
+    raw_angle = motor.get_value('angle')
+    now = novapi.timer()
+    if abs(raw_angle - _lift_homing_last_angle[motor_idx]) < 0.5:
+        if _lift_homing_stall_start[motor_idx] == 0:
+            _lift_homing_stall_start[motor_idx] = now
+        elif now - _lift_homing_stall_start[motor_idx] >= LIFT_HOMING_STALL_TIME:
+            motor.set_power(0)
+            _lift_zero_offset[motor_idx] = raw_angle * LIFT_ENCODER_SIGN[motor_idx]
+            lift_gear[motor_idx] = 0
+            lift_fine_offset[motor_idx] = 0
+            _lift_homing[motor_idx] = False
+            _lift_homing_stall_start[motor_idx] = 0
+            _lift_pid_active[motor_idx] = False
+            return
+    else:
+        _lift_homing_stall_start[motor_idx] = 0
+    _lift_homing_last_angle[motor_idx] = raw_angle
+    motor.set_power(LIFT_HOMING_SPEED * LIFT_DIR[motor_idx])
+
+def _lift_homing_tick_all():
+    _lift_homing_tick(0)
+    _lift_homing_tick(1)
+
+def _lift_start_homing(motor_idx):
+    global _lift_homing, _lift_homing_last_angle, _lift_homing_stall_start
+    _init_lift_motors()
+    if _LIFT_MOTORS[motor_idx] is None:
+        return
+    _lift_homing[motor_idx] = True
+    _lift_homing_last_angle[motor_idx] = _LIFT_MOTORS[motor_idx].get_value('angle')
+    _lift_homing_stall_start[motor_idx] = 0
+
 last_R1 = False
 last_L1 = False
 last_Plus = False
 last_Menu = False
 last_N1 = False
-
-# 调试模式按键边沿变量
 last_Up = False
 last_Down = False
 last_Left = False
@@ -352,173 +1025,105 @@ last_Right = False
 last_N2 = False
 last_N3 = False
 last_N4 = False
+last_R2 = False
+last_L2 = False
 last_L1_debug = False
 last_R1_debug = False
-
-# ==================== 启动确认 ====================
-print("=" * 40)
-print("  三轮全向机器人已启动！")
-print("  左摇杆 → 全向移动")
-print("  右摇杆 ←→ 自旋")
-print("  R1 / L1 → 切换正面")
-print("  + 键 → 自动程序")
-print("  ≡ 键 → 调试模式开关")
-print("=" * 40)
-
-# 点阵屏开机显示
-__led.show("Main")
+last_Dpad_Up_norm = False
+last_Dpad_Down_norm = False
+last_Dpad_Left_norm = False
+last_Dpad_Right_norm = False
+_phase_selecting = False
+debug_cal_mode = False
+debug_cal_running = False
+debug_cal_done_time = 0.0
+__led.show('Main')
 novapi.reset_timer()
-
-# ==================== 主循环 ====================
 while True:
-    # ================================================================
-    #  自动模式
-    # ================================================================
-    if auto_mode:
-        # 检查当前步骤是否超时
-        elapsed = novapi.timer() - auto_step_start
-        step_duration, step_Vx, step_Vy, step_omega = AUTO_SEQUENCE[auto_step]
-
-        if elapsed >= step_duration:
-            # 进入下一步
-            auto_step += 1
-            if auto_step >= len(AUTO_SEQUENCE):
-                # 所有步骤完成，退出自动模式
-                stop_all_motors()
-                auto_mode = False
-                auto_step = 0
-                print(">>> 自动程序完成，恢复遥控")
-            else:
-                # 切换到下一步
-                auto_step_start = novapi.timer()
-                next_dur, next_Vx, next_Vy, next_omega = AUTO_SEQUENCE[auto_step]
-                print(">>> 自动步骤 %d/%d: Vx=%d Vy=%d ω=%d (%.1fs)" %
-                      (auto_step + 1, len(AUTO_SEQUENCE), next_Vx, next_Vy, next_omega, next_dur))
-        else:
-            # 执行当前步骤：根据当前正面旋转速度，再经运动学输出
-            Vx_rot, Vy_rot = rotate_velocity(step_Vx, step_Vy, face)
-            M1_power, M2_power, M3_power = omni_kinematics(Vx_rot, Vy_rot, step_omega)
-            __motor_M1.set_power(M1_power)
-            __motor_M2.set_power(M2_power)
-            __motor_M3.set_power(M3_power)
-
-        time.sleep(AUTO_STEP_DELAY)
-        continue  # 跳过手动/调试逻辑
-
-    # ================================================================
-    #  调试模式
-    # ================================================================
     if debug_mode:
-        # --- 读取按键 ---
-        cur_Up = gamepad.is_key_pressed("Up")
-        cur_Down = gamepad.is_key_pressed("Down")
-        cur_Left = gamepad.is_key_pressed("Left")
-        cur_Right = gamepad.is_key_pressed("Right")
-        cur_N1 = gamepad.is_key_pressed("N1")
-        cur_N2 = gamepad.is_key_pressed("N2")
-        cur_N3 = gamepad.is_key_pressed("N3")
-        cur_L1 = gamepad.is_key_pressed("L1")
-        cur_R1 = gamepad.is_key_pressed("R1")
-        cur_Menu = gamepad.is_key_pressed("≡")
-
-        # --- ≡ 键切换：退出调试模式 ---
-        if cur_Menu and not last_Menu:
+        cur_Up = gamepad.is_key_pressed('Up')
+        cur_Down = gamepad.is_key_pressed('Down')
+        cur_Left = gamepad.is_key_pressed('Left')
+        cur_Right = gamepad.is_key_pressed('Right')
+        cur_N1 = gamepad.is_key_pressed('N1')
+        cur_N2 = gamepad.is_key_pressed('N2')
+        cur_N3 = gamepad.is_key_pressed('N3')
+        cur_L1 = gamepad.is_key_pressed('L1')
+        cur_R1 = gamepad.is_key_pressed('R1')
+        cur_N4 = gamepad.is_key_pressed('N4')
+        cur_Menu = gamepad.is_key_pressed('≡')
+        cur_Plus = gamepad.is_key_pressed('+')
+        if _phase_selecting:
+            if cur_Menu and (not last_Menu):
+                _phase_selecting = False
+                debug_mode = False
+                stop_all_motors()
+                last_Menu = cur_Menu
+                time.sleep(0.3)
+                continue
+            if cur_N2 and (not last_N2):
+                _phase_sel = 0
+                __led.show('Ph1')
+                last_N2 = cur_N2
+                time.sleep(_LD)
+                continue
+            if cur_N4 and (not last_N4):
+                _phase_sel = 1
+                __led.show('Ph2')
+                last_N4 = cur_N4
+                time.sleep(_LD)
+                continue
+            if cur_R1 and (not last_R1):
+                match_phase = _phase_sel
+                _apply_match_phase()
+                __led.show('OK')
+                _phase_selecting = False
+                last_R1 = cur_R1
+                time.sleep(0.4)
+                continue
+            last_N2 = cur_N2
+            last_N4 = cur_N4
+            last_R1 = cur_R1
+            last_Menu = cur_Menu
+            time.sleep(_LD)
+            continue
+        if cur_Left and cur_Right:
+            _dpad_lr_conflict += 1
+        else:
+            _dpad_lr_conflict = 0
+        if _dpad_lr_conflict >= 3:
+            cur_Left = False
+            cur_Right = False
+        if cur_Up and cur_Down:
+            _dpad_ud_conflict += 1
+        else:
+            _dpad_ud_conflict = 0
+        if _dpad_ud_conflict >= 3:
+            cur_Up = False
+            cur_Down = False
+        if cur_Menu and (not last_Menu):
             debug_stop_motor()
             debug_mode = False
-            debug_cal_mode = False
-            debug_cal_running = False
-            debug_cal_done_time = 0.0
+            _phase_selecting = False
             stop_all_motors()
-            __led.show("Main")
-            print(">>> ≡ 退出调试模式，恢复正常操控")
             last_Up = last_Down = last_Left = last_Right = False
             last_N1 = last_N2 = last_N3 = last_N4 = False
             last_L1_debug = last_R1_debug = False
             last_Menu = cur_Menu
             time.sleep(0.3)
             continue
-
-        # ==== 标定子模式 ====
-        if debug_cal_mode:
-
-            # --- 标定移动执行中（非阻塞）---
-            if debug_cal_running:
-                still_running = debug_cal_tick()
-                if not still_running:
-                    # 刚完成：显示最终编码值（保持 2 秒后恢复角度显示）
-                    pass
-                # 更新边沿（防止移动期间按键穿透）
-                last_Up = cur_Up
-                last_Down = cur_Down
-                last_Left = cur_Left
-                last_Right = cur_Right
-                last_N1 = cur_N1
-                last_N2 = cur_N2
-                last_N3 = cur_N3
-                last_L1_debug = cur_L1
-                last_R1_debug = cur_R1
-                last_Menu = cur_Menu
-                time.sleep(LOOP_DELAY)
-                continue
-
-            # --- 标定完成后的最终值展示（2 秒）---
-            if debug_cal_done_time > 0:
-                if novapi.timer() - debug_cal_done_time < 2.0:
-                    # 保持显示最终值 "Fxxx"
-                    last_Up = cur_Up
-                    last_Down = cur_Down
-                    last_Left = cur_Left
-                    last_Right = cur_Right
-                    last_N1 = cur_N1
-                    last_N2 = cur_N2
-                    last_N3 = cur_N3
-                    last_L1_debug = cur_L1
-                    last_R1_debug = cur_R1
-                    last_Menu = cur_Menu
-                    time.sleep(LOOP_DELAY)
-                    continue
-                else:
-                    # 恢复显示当前设定角度
-                    debug_cal_done_time = 0.0
-                    __led.show("E%d" % debug_cal_angle if debug_cal_angle < 10000 else "E%dk" % (debug_cal_angle // 1000))
-
-            # --- 空闲状态：允许调整参数和执行 ---
-            __led.show("E%d" % debug_cal_angle if debug_cal_angle < 10000 else "E%dk" % (debug_cal_angle // 1000))
-
-            # ↑/↓：微调步长，←/→：粗调步长
-            if cur_Up and not last_Up:
-                debug_cal_angle += CAL_ANGLE_STEP
-                print(">>> 标定角度: %d°" % debug_cal_angle)
-            if cur_Down and not last_Down:
-                debug_cal_angle = max(1, debug_cal_angle - CAL_ANGLE_STEP)
-                print(">>> 标定角度: %d°" % debug_cal_angle)
-            if cur_Left and not last_Left:
-                debug_cal_angle = max(1, debug_cal_angle - CAL_ANGLE_COARSE)
-                print(">>> 标定角度: %d°" % debug_cal_angle)
-            if cur_Right and not last_Right:
-                debug_cal_angle += CAL_ANGLE_COARSE
-                print(">>> 标定角度: %d°" % debug_cal_angle)
-
-            # N1：启动标定移动（S曲线+PID+实时显示）
-            if cur_N1 and not last_N1:
-                debug_cal_start(debug_cal_angle)
-
-            # L1+R1 再次按下 → 退出标定模式
-            if cur_L1 and cur_R1 and (not last_L1_debug or not last_R1_debug):
-                debug_cal_mode = False
-                debug_cal_running = False
-                debug_cal_done_time = 0.0
-                stop_all_motors()
-                __led.show("Test")
-                print(">>> 退出标定模式，返回调试模式")
-                last_Up = last_Down = last_Left = last_Right = False
-                last_N1 = last_N2 = last_N3 = False
-                last_L1_debug = last_R1_debug = False
-                last_Menu = cur_Menu
-                time.sleep(0.3)
-                continue
-
-            # 更新边沿
+        cal_key_handled = False
+        if _debug_cal_done:
+            if cur_N1 and (not last_N1):
+                _show_cal_delta(1, _cal_delta_M1)
+                cal_key_handled = True
+            if cur_N2 and (not last_N2):
+                _show_cal_delta(2, _cal_delta_M2)
+                cal_key_handled = True
+            if cur_N3 and (not last_N3):
+                _show_cal_delta(3, _cal_delta_M3)
+                cal_key_handled = True
+        if cal_key_handled:
             last_Up = cur_Up
             last_Down = cur_Down
             last_Left = cur_Left
@@ -526,80 +1131,149 @@ while True:
             last_N1 = cur_N1
             last_N2 = cur_N2
             last_N3 = cur_N3
+            last_N4 = cur_N4
             last_L1_debug = cur_L1
             last_R1_debug = cur_R1
             last_Menu = cur_Menu
-            time.sleep(LOOP_DELAY)
+            time.sleep(_LD)
             continue
-
-        # ==== 主调试模式 ====
-        # --- L1+R1 同时按下 → 进入标定模式 ---
-        if cur_L1 and cur_R1 and (not last_L1_debug or not last_R1_debug):
-            debug_cal_mode = True
-            debug_cal_angle = CAL_ANGLE_DEFAULT
-            debug_cal_running = False
-            debug_cal_done_time = 0.0
-            __led.show("E%d" % debug_cal_angle)
-            print("=" * 40)
-            print("  >>> 进入标定模式！")
-            print("  算法: S曲线(sin加速→匀速→cos减速) + 左右PID补偿")
-            print("  ↑↓ ±%d° | ←→ ±%d°" % (CAL_ANGLE_STEP, CAL_ANGLE_COARSE))
-            print("  N1=执行前进  |  L1+R1=退出")
-            print("  显示屏: 移动中实时编码 → 完成后最终编码(Fxxx)")
-            print("  测量实际距离 → 编码°/cm = %d° / 实际cm" % debug_cal_angle)
-            print("=" * 40)
-            last_Up = last_Down = last_Left = last_Right = False
-            last_N1 = last_N2 = last_N3 = False
-            last_L1_debug = cur_L1
-            last_R1_debug = cur_R1
-            time.sleep(0.3)
-            continue
-
-        # --- 十字键 ↑/↓：切换电机类型 ---
-        if cur_Up and not last_Up:
+        if cur_Up and (not last_Up):
             debug_motor_type = (debug_motor_type + 1) % len(DEBUG_MOTOR_TYPES)
-            print(">>> 电机类型: %s" % DEBUG_MOTOR_TYPES[debug_motor_type])
-        if cur_Down and not last_Down:
+            max_idx = len(DEBUG_ALL_NAMES[debug_motor_type]) - 1
+            if debug_motor_index > max_idx:
+                debug_motor_index = 0
+            if debug_motor_type == 2:
+                __led.show(DEBUG_LIFT_NAMES[debug_lift_gear_index])
+            else:
+                name = DEBUG_ALL_NAMES[debug_motor_type][debug_motor_index]
+                __led.show(name)
+        if cur_Down and (not last_Down):
             debug_motor_type = (debug_motor_type - 1) % len(DEBUG_MOTOR_TYPES)
-            print(">>> 电机类型: %s" % DEBUG_MOTOR_TYPES[debug_motor_type])
-
-        # --- 十字键 ←/→：切换电机编号 ---
-        if cur_Left and not last_Left:
-            debug_motor_index = (debug_motor_index - 1) % len(DEBUG_MOTOR_NAMES)
-            print(">>> 电机编号: %s" % DEBUG_MOTOR_NAMES[debug_motor_index])
-        if cur_Right and not last_Right:
-            debug_motor_index = (debug_motor_index + 1) % len(DEBUG_MOTOR_NAMES)
-            print(">>> 电机编号: %s" % DEBUG_MOTOR_NAMES[debug_motor_index])
-
-        # --- N2 + N3 同时按下 → 退出调试模式 ---
-        if cur_N2 and cur_N3:
-            debug_stop_motor()
-            debug_mode = False
-            debug_cal_mode = False
-            __led.show("Main")
-            print(">>> 退出调试模式，恢复正常操控")
-            last_Up = last_Down = last_Left = last_Right = False
-            last_N1 = last_N2 = last_N3 = last_N4 = False
-            last_L1_debug = last_R1_debug = False
-            last_Menu = cur_Menu
-            time.sleep(0.3)
-            continue
-
-        # --- N1 / N2：正转 / 反转测试 ---
-        if cur_N1:
-            speed = DEBUG_TEST_SPEED
-        elif cur_N2:
-            speed = -DEBUG_TEST_SPEED
+            max_idx = len(DEBUG_ALL_NAMES[debug_motor_type]) - 1
+            if debug_motor_index > max_idx:
+                debug_motor_index = 0
+            if debug_motor_type == 2:
+                __led.show(DEBUG_LIFT_NAMES[debug_lift_gear_index])
+            else:
+                name = DEBUG_ALL_NAMES[debug_motor_type][debug_motor_index]
+                __led.show(name)
+        if debug_motor_type == 2:
+            if cur_Left and (not last_Left):
+                debug_lift_gear_index = (debug_lift_gear_index - 1) % len(DEBUG_LIFT_GEARS)
+                __led.show('A%d' % DEBUG_LIFT_GEARS[debug_lift_gear_index])
+            if cur_Right and (not last_Right):
+                debug_lift_gear_index = (debug_lift_gear_index + 1) % len(DEBUG_LIFT_GEARS)
+                __led.show('A%d' % DEBUG_LIFT_GEARS[debug_lift_gear_index])
         else:
-            speed = 0
-
+            max_idx = len(DEBUG_ALL_NAMES[debug_motor_type]) - 1
+            if cur_Left and (not last_Left):
+                debug_motor_index = (debug_motor_index - 1) % (max_idx + 1)
+                name = DEBUG_ALL_NAMES[debug_motor_type][debug_motor_index]
+                __led.show(name)
+            if cur_Right and (not last_Right):
+                debug_motor_index = (debug_motor_index + 1) % (max_idx + 1)
+                name = DEBUG_ALL_NAMES[debug_motor_type][debug_motor_index]
+                __led.show(name)
+        if not cur_N1 and (not cur_N4):
+            if _debug_cal_done and novapi.timer() < _cal_display_until:
+                pass
+            elif debug_motor_type == 2:
+                __led.show(DEBUG_LIFT_NAMES[debug_lift_gear_index])
+            else:
+                __led.show(DEBUG_ALL_NAMES[debug_motor_type][debug_motor_index])
+        if _debug_cal_done:
+            if cur_N1 and (not last_N1):
+                __led.show('E%d' % int(_cal_delta_M1))
+            if cur_N2 and (not last_N2):
+                __led.show('E%d' % int(_cal_delta_M2))
+            if cur_N3 and (not last_N3):
+                __led.show('E%d' % int(_cal_delta_M3))
         if debug_motor_type == 0:
-            motor = [__motor_M1, __motor_M2, __motor_M3][debug_motor_index]
+            if cur_N1:
+                speed = DEBUG_TEST_SPEED
+            elif cur_N4:
+                speed = -DEBUG_TEST_SPEED
+            else:
+                speed = 0
+            motor = [__motor_M1, __motor_M2, __motor_M3, __motor_M4, __motor_M5][debug_motor_index]
             motor.set_power(speed)
-        else:
+        elif debug_motor_type == 1:
+            if cur_N1:
+                speed = DEBUG_TEST_SPEED
+            elif cur_N4:
+                speed = -DEBUG_TEST_SPEED
+            else:
+                speed = 0
             power_expand_board.set_power(DC_COLLECTOR_PORT, speed)
-
-        # 更新边沿
+        elif debug_motor_type == 2:
+            if cur_N1 and (not last_N1):
+                target = DEBUG_LIFT_GEARS[debug_lift_gear_index]
+                lift_pid_start(0, target)
+                lift_pid_start(1, target)
+                __led.show(DEBUG_LIFT_NAMES[debug_lift_gear_index])
+            if cur_N4 and (not last_N4):
+                _lift_start_homing(0)
+                _lift_start_homing(1)
+                __led.show('L0')
+        elif debug_motor_type == 3:
+            if _HAS_SERVO:
+                try:
+                    _sv = [__servo_1, __servo_2][debug_motor_index]
+                except Exception:
+                    _sv = None
+                if cur_N1 and (not last_N1) and _sv:
+                    _sv.move_to(servo_dir * DEBUG_SERVO_ANGLE, SERVO_MOVE_SPEED)
+                    __led.show('A%d' % DEBUG_SERVO_ANGLE)
+                if cur_N4 and (not last_N4) and _sv:
+                    _sv.move_to(0, SERVO_MOVE_SPEED)
+                    __led.show('SV0')
+        elif debug_motor_type == 4:
+            if cur_N1:
+                speed = DEBUG_TEST_SPEED
+            elif cur_N4:
+                speed = 0
+            else:
+                speed = 0
+            if debug_motor_index == 2:
+                try:
+                    power_expand_board.set_power('BL1', speed)
+                    power_expand_board.set_power('BL2', speed)
+                    power_expand_board.set_power(DC_COLLECTOR_PORT, -100 if speed != 0 else 0)
+                except Exception:
+                    pass
+            else:
+                port = ['BL1', 'BL2'][debug_motor_index]
+                try:
+                    power_expand_board.set_power(port, speed)
+                except Exception:
+                    pass
+        if cur_N2 and (not last_N2):
+            if debug_motor_type == 3:
+                DEBUG_SERVO_ANGLE = min(SERVO_MAX_ANGLE[debug_motor_index], DEBUG_SERVO_ANGLE + 5)
+            elif debug_motor_type == 2:
+                DEBUG_LIFT_GEARS[debug_lift_gear_index] = min(3600, DEBUG_LIFT_GEARS[debug_lift_gear_index] + 2)
+            else:
+                DEBUG_TEST_SPEED = min(100, DEBUG_TEST_SPEED + 10)
+        if cur_N3 and (not last_N3):
+            if debug_motor_type == 3:
+                DEBUG_SERVO_ANGLE = max(0, DEBUG_SERVO_ANGLE - 5)
+            elif debug_motor_type == 2:
+                DEBUG_LIFT_GEARS[debug_lift_gear_index] = max(-3600, DEBUG_LIFT_GEARS[debug_lift_gear_index] - 2)
+            else:
+                DEBUG_TEST_SPEED = max(10, DEBUG_TEST_SPEED - 10)
+        if debug_motor_type == 3 and cur_R1 and (not last_R1_debug) and _HAS_SERVO:
+            try:
+                _sv = [__servo_1, __servo_2][debug_motor_index]
+                _sv.set_zero()
+                __led.show('OK')
+            except Exception:
+                pass
+        if debug_motor_type == 2 and cur_R1 and (not last_R1_debug):
+            __led.show('OK')
+        if debug_motor_type == 2 and cur_L1 and (not last_L1_debug):
+            debug_motor_type = 0
+            debug_motor_index = 0
+            __led.show(DEBUG_ALL_NAMES[0][0])
         last_Up = cur_Up
         last_Down = cur_Down
         last_Left = cur_Left
@@ -607,114 +1281,460 @@ while True:
         last_N1 = cur_N1
         last_N2 = cur_N2
         last_N3 = cur_N3
+        last_N4 = cur_N4
         last_L1_debug = cur_L1
         last_R1_debug = cur_R1
         last_Menu = cur_Menu
-
-        time.sleep(LOOP_DELAY)
-        continue  # 跳过正常模式
-
-    # ================================================================
-    #  正常模式（手动遥控）
-    # ================================================================
-    # --- 1. 读取摇杆原始值 ---
-    Lx = gamepad.get_joystick("Lx")   # 左摇杆水平: -100(左) ~ +100(右)
-    Ly = gamepad.get_joystick("Ly")   # 左摇杆垂直: -100(下) ~ +100(上)
-    Rx = gamepad.get_joystick("Rx")   # 右摇杆水平: -100(左) ~ +100(右)
-
-    # --- 2. 按键边沿触发 ---
-    cur_R1 = gamepad.is_key_pressed("R1")
-    cur_L1 = gamepad.is_key_pressed("L1")
-    cur_Plus = gamepad.is_key_pressed("+")
-    cur_Menu = gamepad.is_key_pressed("≡")
-    cur_N1 = gamepad.is_key_pressed("N1")
-
-    if cur_Menu and not last_Menu:      # ≡ 上升沿 → 调试模式开关
+        if _lift_pid_active[0] or _lift_pid_active[1]:
+            lift_pid_tick_all()
+        if _lift_homing[0] or _lift_homing[1]:
+            _lift_homing_tick_all()
+        time.sleep(_LD)
+        continue
+    cur_L1 = gamepad.is_key_pressed('L1')
+    if face_rotating:
+        if cur_L1 and (not last_L1):
+            face = (face + 1) % 3
+            face_rot_target_deg += FACE_ROTATE_WHEEL_DEG
+            face_rot_start_time = novapi.timer()
+            face_rot_settled = False
+        if face_rotate_tick():
+            face_show_until = novapi.timer() + FACE_SHOW_MS / 1000.0
+        last_L1 = cur_L1
+        __led.show('S%d' % BL_ACTION_SPEED)
+        time.sleep(_LD)
+        continue
+    Lx = gamepad.get_joystick('Lx')
+    Ly = gamepad.get_joystick('Ly')
+    Rx = gamepad.get_joystick('Rx')
+    cur_R1 = gamepad.is_key_pressed('R1')
+    cur_R2 = gamepad.is_key_pressed('R2')
+    cur_L2 = gamepad.is_key_pressed('L2')
+    cur_Plus = gamepad.is_key_pressed('+')
+    cur_Menu = gamepad.is_key_pressed('≡')
+    cur_N1 = gamepad.is_key_pressed('N1')
+    cur_N2 = gamepad.is_key_pressed('N2')
+    cur_N3 = gamepad.is_key_pressed('N3')
+    cur_N4 = gamepad.is_key_pressed('N4')
+    cur_Dpad_Up = gamepad.is_key_pressed('Up')
+    cur_Dpad_Down = gamepad.is_key_pressed('Down')
+    cur_Dpad_Left = gamepad.is_key_pressed('Left')
+    cur_Dpad_Right = gamepad.is_key_pressed('Right')
+    cal_key_handled = False
+    if _debug_cal_done:
+        if cur_N1 and (not last_N1):
+            _show_cal_delta(1, _cal_delta_M1)
+            cal_key_handled = True
+        if cur_N2 and (not last_N2):
+            _show_cal_delta(2, _cal_delta_M2)
+            cal_key_handled = True
+        if cur_N3 and (not last_N3):
+            _show_cal_delta(3, _cal_delta_M3)
+            cal_key_handled = True
+    if cal_key_handled:
+        last_R1 = cur_R1
+        last_R2 = cur_R2
+        last_L2 = cur_L2
+        last_L1 = cur_L1
+        last_Plus = cur_Plus
+        last_Menu = cur_Menu
+        last_N1 = cur_N1
+        last_N2 = cur_N2
+        last_N3 = cur_N3
+        last_N4 = cur_N4
+        last_Dpad_Up_norm = cur_Dpad_Up
+        last_Dpad_Down_norm = cur_Dpad_Down
+        last_Dpad_Left_norm = cur_Dpad_Left
+        last_Dpad_Right_norm = cur_Dpad_Right
+        if _lift_pid_active[0] or _lift_pid_active[1]:
+            lift_pid_tick_all()
+        if _lift_homing[0] or _lift_homing[1]:
+            _lift_homing_tick_all()
+        time.sleep(_LD)
+        continue
+    if cur_Plus and (not last_Plus) and (not auto_mode) and (not debug_mode):
+        auto_mode = True
+        auto_step = 0
+        _esi = -1
+        last_Plus = cur_Plus
+        time.sleep(0.2)
+        continue
+    if auto_mode:
+        if cur_N4 and (not last_N4):
+            auto_mode = False
+            auto_step = 0
+            _esi = -1
+            stop_all_motors()
+            __led.show('Stop')
+            last_N4 = cur_N4
+            time.sleep(0.2)
+            continue
+        if auto_step >= len(AUTO_SEQUENCE):
+            auto_mode = False
+            auto_step = 0
+            _esi = -1
+            stop_all_motors()
+            __led.show('Done')
+            last_R1 = cur_R1
+            last_R2 = cur_R2
+            last_L2 = cur_L2
+            last_L1 = cur_L1
+            last_Plus = cur_Plus
+            last_Menu = cur_Menu
+            last_N1 = cur_N1
+            last_N2 = cur_N2
+            last_N3 = cur_N3
+            last_N4 = cur_N4
+            last_Dpad_Up_norm = cur_Dpad_Up
+            last_Dpad_Down_norm = cur_Dpad_Down
+            last_Dpad_Left_norm = cur_Dpad_Left
+            last_Dpad_Right_norm = cur_Dpad_Right
+            time.sleep(_LD)
+            continue
+        cmd = AUTO_SEQUENCE[auto_step]
+        tag = cmd[0]
+        if _esi != auto_step:
+            _esi = auto_step
+            if tag == 'enc_move':
+                _enc_move_start(cmd[1], cmd[2], cmd[3] if len(cmd) > 3 else 0)
+            elif tag == 'enc_move_s':
+                _enc_move_s_start(cmd[1], cmd[2], cmd[3],
+                                   cmd[4] if len(cmd) > 4 else 0,
+                                   cmd[5] if len(cmd) > 5 else 0,
+                                   cmd[6] if len(cmd) > 6 else 30)
+            elif tag == 'enc_rot':
+                _enc_rot_start(cmd[1], cmd[3] if len(cmd) > 3 else cmd[2],
+                               cmd[4] if len(cmd) > 4 else 0,
+                               cmd[5] if len(cmd) > 5 else 0,
+                               cmd[6] if len(cmd) > 6 else 18)
+            elif tag == 'enc_stop':
+                stop_all_motors()
+                auto_step += 1
+            elif tag == 'delay':
+                _enc_step_start_time = novapi.timer()
+            elif tag == 'motor':
+                try:
+                    motor_map = {'M1': __motor_M1, 'M2': __motor_M2, 'M3': __motor_M3}
+                    m = motor_map.get(cmd[1])
+                    if m:
+                        m.set_power(cmd[2])
+                except Exception:
+                    pass
+                auto_step += 1
+            elif tag == 'dc_motor':
+                try:
+                    power_expand_board.set_power(cmd[1], cmd[2])
+                except Exception:
+                    pass
+                auto_step += 1
+            elif tag == 'enc_moverot':
+                _enc_moverot_start(cmd[1], cmd[2], cmd[3], cmd[4],
+                                   cmd[5] if len(cmd) > 5 else 0,
+                                   cmd[6] if len(cmd) > 6 else 0,
+                                   cmd[7] if len(cmd) > 7 else 0,
+                                   cmd[8] if len(cmd) > 8 else 18)
+            elif tag == 'open_move':
+                _open_move_start(cmd[1], cmd[2], cmd[3] if len(cmd) > 3 else 0,
+                                 cmd[4] if len(cmd) > 4 else 0)
+            elif tag == 'lift':
+                _la = cmd[1] if len(cmd) > 1 else 2
+                _ld = cmd[2] if len(cmd) > 2 else 0
+                if _la != 1: lift_pid_start(0, _ld)
+                if _la != 0: lift_pid_start(1, _ld)
+            elif tag == 'lift_async':
+                _la = cmd[1] if len(cmd) > 1 else 2
+                _ld = cmd[2] if len(cmd) > 2 else 0
+                if _la != 1: lift_pid_start(0, _ld)
+                if _la != 0: lift_pid_start(1, _ld)
+                auto_step += 1
+                _esi = -1
+            elif tag == 'face_rot':
+                face = (face + 1) % 3
+                face_rotate_start()
+            elif tag == 'servo':
+                try:
+                    sv = __servo_1 if cmd[1] == 'SV1' else __servo_2
+                    spd = cmd[3] if len(cmd) > 3 and cmd[3] else SERVO_MOVE_SPEED
+                    sv.move_to(int(cmd[2]), spd)
+                except Exception:
+                    pass
+                _enc_step_start_time = novapi.timer()
+            elif tag == 'grip':
+                _sv_id = cmd[1] if len(cmd) > 1 else 'SV1'
+                _sv_action = cmd[2] if len(cmd) > 2 else 1
+                _sv_idx = {'SV1': 0, 'SV2': 1, 'SV3': 2}.get(_sv_id, 0)
+                if _sv_action == 0:
+                    try:
+                        [__servo_1, __servo_2, __servo_3][_sv_idx].move_to(0, SERVO_MOVE_SPEED)
+                    except Exception:
+                        pass
+                    _grip_closing[_sv_idx] = False
+                    _grip_hold[_sv_idx] = False
+                    auto_step += 1
+                    _esi = -1
+                else:
+                    try:
+                        [__servo_1, __servo_2, __servo_3][_sv_idx].set_power(GRIP_CLOSE_POWER)
+                    except Exception:
+                        pass
+                    _grip_closing[_sv_idx] = True
+                    _grip_hold[_sv_idx] = False
+                    _grip_start_time[_sv_idx] = novapi.timer()
+                    _grip_settled[_sv_idx] = False
+        else:
+            if tag == 'enc_move':
+                if _enc_move_tick(abs(cmd[2])):
+                    auto_step += 1
+                    _esi = -1
+            elif tag == 'enc_move_s':
+                if _enc_move_s_tick():
+                    auto_step += 1
+                    _esi = -1
+            elif tag == 'enc_rot':
+                if _enc_rot_tick(abs(cmd[3]) if len(cmd) > 3 else abs(cmd[2])):
+                    auto_step += 1
+                    _esi = -1
+            elif tag == 'enc_moverot':
+                if _enc_moverot_tick():
+                    auto_step += 1
+                    _esi = -1
+            elif tag == 'open_move':
+                if _open_move_tick():
+                    auto_step += 1
+                    _esi = -1
+            elif tag == 'lift':
+                if not _lift_pid_active[0] and not _lift_pid_active[1]:
+                    auto_step += 1
+                    _esi = -1
+            elif tag == 'lift_async':
+                auto_step += 1
+                _esi = -1
+            elif tag == 'face_rot':
+                if not face_rotating:
+                    auto_step += 1
+                    _esi = -1
+            elif tag == 'delay':
+                if novapi.timer() - _enc_step_start_time >= cmd[1]:
+                    auto_step += 1
+                    _esi = -1
+            elif tag == 'servo':
+                wait_s = max(0.3, cmd[4] / 1000.0 if len(cmd) > 4 else 0.5)
+                if novapi.timer() - _enc_step_start_time >= wait_s:
+                    auto_step += 1
+                    _esi = -1
+            elif tag == 'grip':
+                if not _grip_closing[{'SV1': 0, 'SV2': 1, 'SV3': 2}.get(cmd[1] if len(cmd) > 1 else 'SV1', 0)]:
+                    auto_step += 1
+                    _esi = -1
+        if _lift_pid_active[0] or _lift_pid_active[1]:
+            lift_pid_tick_all()
+        if _lift_homing[0] or _lift_homing[1]:
+            _lift_homing_tick_all()
+        _grip_tick_all()
+        last_R1 = cur_R1
+        last_R2 = cur_R2
+        last_L2 = cur_L2
+        last_L1 = cur_L1
+        last_Plus = cur_Plus
+        last_Menu = cur_Menu
+        last_N1 = cur_N1
+        last_N2 = cur_N2
+        last_N3 = cur_N3
+        last_N4 = cur_N4
+        last_Dpad_Up_norm = cur_Dpad_Up
+        last_Dpad_Down_norm = cur_Dpad_Down
+        last_Dpad_Left_norm = cur_Dpad_Left
+        last_Dpad_Right_norm = cur_Dpad_Right
+        time.sleep(_LD)
+        continue
+    if cur_Menu and (not last_Menu):
         if debug_mode:
-            # 退出调试
             debug_stop_motor()
             debug_mode = False
-            debug_cal_mode = False
-            debug_cal_running = False
-            debug_cal_done_time = 0.0
             stop_all_motors()
-            __led.show("Main")
-            print(">>> ≡ 退出调试模式，恢复正常操控")
             last_Up = last_Down = last_Left = last_Right = False
             last_N1 = last_N2 = last_N3 = last_N4 = False
             last_L1_debug = last_R1_debug = False
             last_Menu = cur_Menu
             time.sleep(0.3)
         else:
-            # 进入调试
             debug_mode = True
             debug_motor_type = 0
             debug_motor_index = 0
             debug_cal_mode = False
             debug_cal_running = False
             debug_cal_done_time = 0.0
-            __led.show("Test")
-            # 重置调试按键边沿防止残留触发
+            _phase_selecting = True
+            _phase_sel = match_phase
+            __led.show('Ph%d' % (match_phase + 1))
             last_Up = last_Down = last_Left = last_Right = False
             last_N1 = last_N2 = last_N3 = last_N4 = False
             last_L1_debug = last_R1_debug = False
             last_Menu = cur_Menu
-            print("=" * 40)
-            print("  >>> 进入调试模式！")
-            print("  ↑↓ 切换电机类型 | ← → 切换电机编号")
-            print("  N1=+50  N2=-50  |  N2+N3=退出")
-            print("  L1+R1=标定模式  |  ≡ =退出")
-            print("=" * 40)
         continue
-
-    if cur_R1 and not last_R1:          # R1 上升沿 → 右转切面
-        face = (face - 1) % 3
-        print(">>> 正面切换: %s" % FACE_NAMES[face])
-    if cur_L1 and not last_L1:          # L1 上升沿 → 左转切面
+    cur_motor_idx = _face_lift_motor[face]
+    cur_servo_idx = _face_grip_servo[face]
+    if cur_L1 and (not last_L1):
+        if bl1_on:
+            power_expand_board.stop('BL1')
+            bl1_on = False
         face = (face + 1) % 3
-        print(">>> 正面切换: %s" % FACE_NAMES[face])
-    if cur_Plus and not last_Plus:      # + 上升沿 → 启动自动程序
-        auto_mode = True
-        auto_step = 0
-        auto_step_start = novapi.timer()
-        dur0, Vx0, Vy0, w0 = AUTO_SEQUENCE[0]
-        print(">>> 自动程序启动！步骤 1/%d: Vx=%d Vy=%d ω=%d (%.1fs)" %
-              (len(AUTO_SEQUENCE), Vx0, Vy0, w0, dur0))
-    if cur_N1 and not last_N1:          # N1 上升沿 → 收球开关翻转
-        collector_on = not collector_on
-        if collector_on:
-            power_expand_board.set_power(DC_COLLECTOR_PORT, DC_COLLECTOR_SPEED)
-            print(">>> 收球电机: 开 (正转 %d)" % DC_COLLECTOR_SPEED)
-        else:
-            power_expand_board.set_power(DC_COLLECTOR_PORT, 0)
-            print(">>> 收球电机: 关")
-
+        face_rotate_start()
+        last_L1 = cur_L1
+        last_R1 = cur_R1
+        time.sleep(_LD)
+        continue
+    if cur_N2 and (not last_N2) and (not _debug_cal_done):
+        if face == 0:
+            collector_on = not collector_on
+            if collector_on:
+                power_expand_board.set_power(DC_COLLECTOR_PORT, DC_COLLECTOR_SPEED)
+            else:
+                power_expand_board.set_power(DC_COLLECTOR_PORT, 0)
+        elif cur_motor_idx is not None:
+            lift_gear[cur_motor_idx] = (lift_gear[cur_motor_idx] + 1) % len(DEBUG_LIFT_GEARS)
+            lift_fine_offset[cur_motor_idx] = 0
+            target_deg = DEBUG_LIFT_GEARS[lift_gear[cur_motor_idx]]
+            lift_pid_start(cur_motor_idx, target_deg)
+    if cur_R2 and (not last_R2) and (not _debug_cal_done):
+        if face == 0:
+            bl1_on = not bl1_on
+            if bl1_on:
+                power_expand_board.set_power('BL1', BL_ACTION_SPEED)
+            else:
+                power_expand_board.stop('BL1')
+        elif cur_servo_idx is not None:
+            _grip_active[cur_servo_idx] = not _grip_active[cur_servo_idx]
+            if _grip_active[cur_servo_idx]:
+                _grip_closing[cur_servo_idx] = True
+                _grip_hold[cur_servo_idx] = False
+                _grip_start_time[cur_servo_idx] = novapi.timer()
+                _grip_settled[cur_servo_idx] = False
+                _grip_last_print[cur_servo_idx] = 0.0
+                if _HAS_SERVO:
+                    try:
+                        sv = [__servo_1, __servo_2, __servo_3][cur_servo_idx]
+                        sv.set_power(GRIP_CLOSE_POWER)
+                    except Exception:
+                        pass
+            else:
+                _grip_closing[cur_servo_idx] = False
+                _grip_hold[cur_servo_idx] = False
+                if _HAS_SERVO:
+                    try:
+                        sv = [__servo_1, __servo_2, __servo_3][cur_servo_idx]
+                        sv.set_power(0)
+                        sv.move_to(0, 30)
+                    except Exception:
+                        pass
+    if cur_Dpad_Up and (not last_Dpad_Up_norm) and (not _debug_cal_done):
+        if face == 0:
+            BL_ACTION_SPEED = min(100, BL_ACTION_SPEED + 5)
+            if bl1_on:
+                power_expand_board.set_power('BL1', BL_ACTION_SPEED)
+        elif cur_motor_idx is not None:
+            lift_gear[cur_motor_idx] = (lift_gear[cur_motor_idx] + 1) % len(DEBUG_LIFT_GEARS)
+            lift_fine_offset[cur_motor_idx] = 0
+            target_deg = DEBUG_LIFT_GEARS[lift_gear[cur_motor_idx]]
+            lift_pid_start(cur_motor_idx, target_deg)
+    if cur_Dpad_Down and (not last_Dpad_Down_norm) and (not _debug_cal_done):
+        if face == 0:
+            BL_ACTION_SPEED = max(10, BL_ACTION_SPEED - 5)
+            if bl1_on:
+                power_expand_board.set_power('BL1', BL_ACTION_SPEED)
+        elif cur_motor_idx is not None:
+            lift_gear[cur_motor_idx] = (lift_gear[cur_motor_idx] - 1) % len(DEBUG_LIFT_GEARS)
+            lift_fine_offset[cur_motor_idx] = 0
+            target_deg = DEBUG_LIFT_GEARS[lift_gear[cur_motor_idx]]
+            lift_pid_start(cur_motor_idx, target_deg)
+    if cur_Dpad_Left and (not last_Dpad_Left_norm) and (not _debug_cal_done):
+        if cur_motor_idx is not None:
+            lift_fine_offset[cur_motor_idx] -= LIFT_FINE_STEP
+            target_deg = DEBUG_LIFT_GEARS[lift_gear[cur_motor_idx]] + lift_fine_offset[cur_motor_idx]
+            target_deg = max(0, target_deg)
+            lift_pid_start(cur_motor_idx, target_deg)
+    if cur_Dpad_Right and (not last_Dpad_Right_norm) and (not _debug_cal_done):
+        if cur_motor_idx is not None:
+            lift_fine_offset[cur_motor_idx] += LIFT_FINE_STEP
+            target_deg = DEBUG_LIFT_GEARS[lift_gear[cur_motor_idx]] + lift_fine_offset[cur_motor_idx]
+            lift_pid_start(cur_motor_idx, target_deg)
+    if cur_N3 and (not last_N3) and (not _debug_cal_done):
+        if cur_motor_idx is not None:
+            lift_gear[cur_motor_idx] = 0
+            lift_fine_offset[cur_motor_idx] = 0
+            _lift_start_homing(cur_motor_idx)
+    if cur_R1 and (not last_R1) and (not _debug_cal_done):
+        if face == 0:
+            if _HAS_SERVO:
+                try:
+                    __servo_3.move_to(0, SERVO_MOVE_SPEED)
+                except Exception:
+                    pass
+        elif cur_motor_idx is not None:
+            lift_gear[cur_motor_idx] = 0
+            lift_fine_offset[cur_motor_idx] = 0
+            _lift_start_homing(cur_motor_idx)
+            if cur_servo_idx is not None and _HAS_SERVO:
+                try:
+                    _grip_active[cur_servo_idx] = False
+                    _grip_closing[cur_servo_idx] = False
+                    _grip_hold[cur_servo_idx] = False
+                    sv = [__servo_1, __servo_2, __servo_3][cur_servo_idx]
+                    sv.set_power(0)
+                    sv.move_to(0, SERVO_MOVE_SPEED)
+                except Exception:
+                    pass
+        elif cur_servo_idx is not None and _HAS_SERVO:
+            try:
+                _grip_active[cur_servo_idx] = False
+                _grip_closing[cur_servo_idx] = False
+                _grip_hold[cur_servo_idx] = False
+                sv = [__servo_1, __servo_2, __servo_3][cur_servo_idx]
+                sv.set_power(0)
+                sv.move_to(0, SERVO_MOVE_SPEED)
+            except Exception:
+                pass
+    if cur_N4 and (not last_N4) and (not _debug_cal_done):
+        if face == 0:
+            dc_out_on = not dc_out_on
+            if dc_out_on:
+                power_expand_board.set_power('DC2', 100)
+            else:
+                power_expand_board.set_power('DC2', 0)
     last_R1 = cur_R1
+    last_R2 = cur_R2
+    last_L2 = cur_L2
     last_L1 = cur_L1
     last_Plus = cur_Plus
     last_Menu = cur_Menu
     last_N1 = cur_N1
-
-    # --- 3. 死区过滤 ---
+    last_N2 = cur_N2
+    last_N3 = cur_N3
+    last_N4 = cur_N4
+    last_Dpad_Up_norm = cur_Dpad_Up
+    last_Dpad_Down_norm = cur_Dpad_Down
+    last_Dpad_Left_norm = cur_Dpad_Left
+    last_Dpad_Right_norm = cur_Dpad_Right
+    if _lift_pid_active[0] or _lift_pid_active[1]:
+        lift_pid_tick_all()
+    if _lift_homing[0] or _lift_homing[1]:
+        _lift_homing_tick_all()
+    _grip_tick_all()
     Lx = apply_dead_zone(Lx)
     Ly = apply_dead_zone(Ly)
     Rx = apply_dead_zone(Rx)
-
-    # --- 4. 速度缩放与映射 ---
-    Vx_raw =  Lx * SPEED_SCALE       # 左摇杆水平 → 原始横移速度（+右）
-    Vy_raw = -Ly * SPEED_SCALE       # 左摇杆垂直 → 原始前进速度（摇杆上推时 Ly>0，电机正转为后退，故取反）
-    omega  =  Rx * SPEED_SCALE       # 右摇杆水平 → 旋转速度（+顺时针）
-
-    # --- 5. 根据当前正面旋转速度向量 ---
-    Vx, Vy = rotate_velocity(Vx_raw, Vy_raw, face)
-
-    # --- 6. 运动学解算 ---
+    Lx = apply_response_curve(Lx)
+    Ly = apply_response_curve(Ly)
+    Rx = apply_response_curve(Rx)
+    Vx = Lx * SPEED_SCALE
+    Vy = -Ly * SPEED_SCALE
+    omega = Rx * SPEED_SCALE
+    Vx, Vy = rotate_velocity(Vx, Vy, face)
+    Vy *= VY_BOOST
     M1_power, M2_power, M3_power = omni_kinematics(Vx, Vy, omega)
-
-    # --- 7. 输出到电机 ---
     __motor_M1.set_power(M1_power)
     __motor_M2.set_power(M2_power)
     __motor_M3.set_power(M3_power)
-
-    # --- 8. 循环延时 ---
-    time.sleep(LOOP_DELAY)
+    if not (_debug_cal_done and novapi.timer() < _cal_display_until):
+        __led.show('S%d' % BL_ACTION_SPEED)
+    time.sleep(_LD)

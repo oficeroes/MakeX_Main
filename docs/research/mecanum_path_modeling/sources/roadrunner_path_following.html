@@ -1,0 +1,838 @@
+<!DOCTYPE html>
+<html lang="en-us" dir="ltr">
+<head>
+  <meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<meta name="description" content="Path Following # Teams almost always use RR to generate and follow trajectories that specify where the robot should be at every point in time. To follow a trajectory, the robot controller starts a stopwatch and directs the feedback controller to close the gap between the estimated pose and the desired pose at the current time from the trajectory. A key advantage of this approach is the clear termination criterion: when the stopwatch hits the trajectory duration.">
+<meta name="theme-color" media="(prefers-color-scheme: light)" content="#ffffff">
+<meta name="theme-color" media="(prefers-color-scheme: dark)" content="#343a40">
+<meta name="color-scheme" content="light dark"><meta property="og:title" content="" />
+<meta property="og:description" content="" />
+<meta property="og:type" content="website" />
+<meta property="og:url" content="https://rr.brott.dev/docs/v1-0/guides/path-following/" />
+<title>Path Following | Road Runner Docs</title>
+<link rel="manifest" href="/manifest.json">
+<link rel="icon" href="/favicon.png" >
+<link rel="stylesheet" href="/book.min.33a48f5432973b8ff9a82679d9e45d67f2c15d4399bd2829269455cfe390b5e8.css" integrity="sha256-M6SPVDKXO4/5qCZ52eRdZ/LBXUOZvSgpJpRVz&#43;OQteg=" crossorigin="anonymous">
+  <script defer src="/flexsearch.min.js"></script>
+  <script defer src="/en.search.min.0840d20475935a3cf079c619f3818b553a49b7702c58fbd51c4fc65af7e56fe1.js" integrity="sha256-CEDSBHWTWjzwecYZ84GLVTpJt3AsWPvVHE/GWvflb&#43;E=" crossorigin="anonymous"></script>
+<link rel="alternate" type="application/rss+xml" href="https://rr.brott.dev/docs/v1-0/guides/path-following/index.xml" title="Road Runner Docs" />
+<!--
+Made with Book Theme
+https://github.com/alex-shpak/hugo-book
+-->
+  
+</head>
+<body dir="ltr">
+  <input type="checkbox" class="hidden toggle" id="menu-control" />
+  <input type="checkbox" class="hidden toggle" id="toc-control" />
+  <main class="container flex">
+    <aside class="book-menu">
+      <div class="book-menu-content">
+        
+  <nav>
+<h2 class="book-brand">
+  <a class="flex align-center" href="/"><span>Road Runner Docs</span>
+  </a>
+</h2>
+
+
+<div class="book-search">
+  <input type="text" id="book-search-input" placeholder="Search" aria-label="Search" maxlength="64" data-hotkeys="s/" />
+  <div class="book-search-spinner hidden"></div>
+  <ul id="book-search-results"></ul>
+</div>
+
+
+
+
+
+
+
+
+
+
+
+
+  
+
+
+
+  
+  <ul>
+    
+      
+        <li>
+          
+  
+  
+
+  
+    <span>1.0.x</span>
+  
+
+          
+  <ul>
+    
+      
+        <li>
+          
+  
+  
+
+  
+    <a href="/docs/v1-0/installation/" class="">Installation</a>
+  
+
+        </li>
+      
+    
+      
+        <li>
+          
+  
+  
+
+  
+    <a href="/docs/v1-0/new-features/" class="">New Features</a>
+  
+
+        </li>
+      
+    
+      
+        <li>
+          
+  
+  
+
+  
+    <a href="/docs/v1-0/migration/" class="">Migrating from 0.5.x</a>
+  
+
+        </li>
+      
+    
+      
+        <li>
+          
+  
+  
+
+  
+    <a href="/docs/v1-0/actions/" class="">Actions</a>
+  
+
+        </li>
+      
+    
+      
+        <li>
+          
+  
+  
+
+  
+    <a href="/docs/v1-0/tuning/" class="">Tuning</a>
+  
+
+        </li>
+      
+    
+      
+        <li>
+          
+  
+  
+
+  
+    <a href="/docs/v1-0/api-docs/" class="">API Docs</a>
+  
+
+        </li>
+      
+    
+      
+        <li>
+          
+  
+  
+
+  
+    <a href="/docs/v1-0/builder-ref/" class="">Builder Reference</a>
+  
+
+        </li>
+      
+    
+      
+        <li>
+          
+  
+  
+
+  
+    <span>Guides</span>
+  
+
+          
+  <ul>
+    
+      
+        <li>
+          
+  
+  
+
+  
+    <a href="/docs/v1-0/guides/cancellation/" class="">Cancellation</a>
+  
+
+        </li>
+      
+    
+      
+        <li>
+          
+  
+  
+
+  
+    <a href="/docs/v1-0/guides/extra-correction/" class="">Extra Correction</a>
+  
+
+        </li>
+      
+    
+      
+        <li>
+          
+  
+  
+
+  
+    <a href="/docs/v1-0/guides/path-following/" class="active">Path Following</a>
+  
+
+          
+  <ul>
+    
+  </ul>
+
+        </li>
+      
+    
+      
+        <li>
+          
+  
+  
+
+  
+    <a href="/docs/v1-0/guides/pose-mapping/" class="">Pose Mapping</a>
+  
+
+          
+  <ul>
+    
+  </ul>
+
+        </li>
+      
+    
+      
+        <li>
+          
+  
+  
+
+  
+    <a href="/docs/v1-0/guides/teleop-actions/" class="">Teleop Actions</a>
+  
+
+        </li>
+      
+    
+      
+        <li>
+          
+  
+  
+
+  
+    <a href="/docs/v1-0/guides/variable-constraints/" class="">Variable Constraints</a>
+  
+
+          
+  <ul>
+    
+  </ul>
+
+        </li>
+      
+    
+      
+        <li>
+          
+  
+  
+
+  
+    <a href="/docs/v1-0/guides/centerstage-auto/" class="">Building a CENTERSTAGE Autonomous</a>
+  
+
+        </li>
+      
+    
+      
+        <li>
+          
+  
+  
+
+  
+    <a href="/docs/v1-0/guides/continuity/" class="">Continuity</a>
+  
+
+          
+  <ul>
+    
+  </ul>
+
+        </li>
+      
+    
+      
+        <li>
+          
+  
+  
+
+  
+    <a href="/docs/v1-0/guides/ftclib-commands/" class="">FTCLib Commands</a>
+  
+
+        </li>
+      
+    
+      
+        <li>
+          
+  
+  
+
+  
+    <a href="/docs/v1-0/guides/tangents/" class="">Tangents</a>
+  
+
+          
+  <ul>
+    
+  </ul>
+
+        </li>
+      
+    
+  </ul>
+
+        </li>
+      
+    
+      
+        <li>
+          
+  
+  
+
+  
+    <a href="/docs/v1-0/log-files/" class="">Log Files</a>
+  
+
+        </li>
+      
+    
+      
+        <li>
+          
+  
+  
+
+  
+    <a href="/docs/v1-0/modules/" class="">Modules</a>
+  
+
+        </li>
+      
+    
+  </ul>
+
+        </li>
+      
+    
+      
+        <li>
+          
+  
+  
+
+  
+    <span>0.5.x</span>
+  
+
+          
+  <ul>
+    
+      
+        <li>
+          
+  
+  
+
+  
+    <a href="/docs/v0-5/installation/" class="">Installation</a>
+  
+
+        </li>
+      
+    
+      
+        <li>
+          
+  
+  
+
+  
+    <a href="/docs/v0-5/kdoc/" class="">KDoc</a>
+  
+
+        </li>
+      
+    
+      
+        <li>
+          
+  
+  
+
+  
+    <a href="/docs/v0-5/javadoc/" class="">Javadoc</a>
+  
+
+        </li>
+      
+    
+      
+        <li>
+          
+  
+  
+
+  
+    <span>Tour</span>
+  
+
+          
+  <ul>
+    
+      
+        <li>
+          
+  
+  
+
+  
+    <a href="/docs/v0-5/tour/introduction/" class="">Introduction</a>
+  
+
+        </li>
+      
+    
+      
+        <li>
+          
+  
+  
+
+  
+    <a href="/docs/v0-5/tour/pid-control/" class="">PID Control</a>
+  
+
+        </li>
+      
+    
+      
+        <li>
+          
+  
+  
+
+  
+    <a href="/docs/v0-5/tour/feedforward-control/" class="">Feedforward Control</a>
+  
+
+        </li>
+      
+    
+      
+        <li>
+          
+  
+  
+
+  
+    <a href="/docs/v0-5/tour/motion-profiling/" class="">Motion Profiling</a>
+  
+
+        </li>
+      
+    
+      
+        <li>
+          
+  
+  
+
+  
+    <a href="/docs/v0-5/tour/coordinate-frame/" class="">Coordinate Frames</a>
+  
+
+        </li>
+      
+    
+      
+        <li>
+          
+  
+  
+
+  
+    <a href="/docs/v0-5/tour/parametric-paths/" class="">Parametric Paths</a>
+  
+
+        </li>
+      
+    
+      
+        <li>
+          
+  
+  
+
+  
+    <a href="/docs/v0-5/tour/trajectories/" class="">Trajectories</a>
+  
+
+        </li>
+      
+    
+      
+        <li>
+          
+  
+  
+
+  
+    <a href="/docs/v0-5/tour/kinematics/" class="">Kinematics</a>
+  
+
+        </li>
+      
+    
+  </ul>
+
+        </li>
+      
+    
+      
+        <li>
+          
+  
+  
+
+  
+    <span>Quickstart</span>
+  
+
+          
+  <ul>
+    
+      
+        <li>
+          
+  
+  
+
+  
+    <a href="/docs/v0-5/quickstart/introduction/" class="">Introduction</a>
+  
+
+        </li>
+      
+    
+      
+        <li>
+          
+  
+  
+
+  
+    <a href="/docs/v0-5/quickstart/tuning/" class="">Tuning</a>
+  
+
+        </li>
+      
+    
+      
+        <li>
+          
+  
+  
+
+  
+    <a href="/docs/v0-5/quickstart/faq/" class="">FAQ</a>
+  
+
+        </li>
+      
+    
+  </ul>
+
+        </li>
+      
+    
+  </ul>
+
+        </li>
+      
+    
+      
+        <li>
+          
+  
+  
+
+  
+    <a href="/docs/resources/" class="">Resources</a>
+  
+
+        </li>
+      
+    
+      
+        <li>
+          
+  
+  
+
+  
+    <a href="/docs/meepmeep/" class="">MeepMeep Visualizer</a>
+  
+
+        </li>
+      
+    
+  </ul>
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+</nav>
+
+
+
+
+  <script>(function(){var e=document.querySelector("aside .book-menu-content");addEventListener("beforeunload",function(){localStorage.setItem("menu.scrollTop",e.scrollTop)}),e.scrollTop=localStorage.getItem("menu.scrollTop")})()</script>
+
+
+ 
+      </div>
+    </aside>
+
+    <div class="book-page">
+      <header class="book-header">
+        
+  <div class="flex align-center justify-between">
+  <label for="menu-control">
+    <img src="/svg/menu.svg" class="book-icon" alt="Menu" />
+  </label>
+
+  <strong>Path Following</strong>
+
+  <label for="toc-control">
+    
+    <img src="/svg/toc.svg" class="book-icon" alt="Table of Contents" />
+    
+  </label>
+</div>
+
+
+  
+  <aside class="hidden clearfix">
+    
+  
+<nav id="TableOfContents"></nav>
+
+
+
+  </aside>
+  
+ 
+      </header>
+
+      
+      
+  <article class="markdown"><h1 id="path-following">
+  Path Following
+  <a class="anchor" href="#path-following">#</a>
+</h1>
+<p>Teams almost always use RR to generate and follow trajectories that specify
+where the robot should be at every point in time. To follow a trajectory, the
+robot controller starts a stopwatch and directs the feedback controller to close
+the gap between the estimated pose and the desired pose at the current time from
+the trajectory. A key advantage of this approach is the clear termination
+criterion: when the stopwatch hits the trajectory duration.</p>
+<p>The main disadvantage is that you can&rsquo;t make full use of your robot&rsquo;s
+capabilities. The feedback controller needs some headroom to speed up if it
+falls behind, and that headroom leaves performance on the table. And if the
+robot gets ahead of its trajectory, the feedback controller will push it
+backwards away from the goal which leaves time on the table.</p>
+<p>If you want to push your robot to its limits, you can try a different following
+paradigm that doesn&rsquo;t used a fixed temporal schedule. Instead of using a
+stopwatch to compute a desired pose, the controller finds the closest point on
+the path to the robot and moves based on it.</p>
+<blockquote class="book-hint info">
+  This approach is similar to pure pursuit which you may have heard of before. The
+main difference is that our proposed path follower doesn&rsquo;t have a lookahead and
+attempts higher-accuracy tracking of the path instead of merely pushing toward
+the goal.
+</blockquote>
+
+<p>To see how to implement this, let&rsquo;s work up from the <code>HolonomicController</code>
+class. It implements one method with the signature</p>
+<div class="highlight"><pre tabindex="0" style="color:#f8f8f2;background-color:#272822;-moz-tab-size:4;-o-tab-size:4;tab-size:4;"><code class="language-kotlin" data-lang="kotlin"><span style="display:flex;"><span><span style="color:#66d9ef">fun</span> <span style="color:#a6e22e">compute</span>(
+</span></span><span style="display:flex;"><span>    targetPose: Pose2dDual&lt;Time&gt;,
+</span></span><span style="display:flex;"><span>    actualPose: Pose2d,
+</span></span><span style="display:flex;"><span>    actualVelActual: PoseVelocity2d,
+</span></span><span style="display:flex;"><span>): PoseVelocity2dDual&lt;Time&gt;
+</span></span></code></pre></div><p>The latter two arguments come from the localizer as with trajectory. The
+question is how to get <code>targetPose</code>, a pose on the path and its derivative with
+respect to time. We can call <code>project(path, actualPose, displacementGuess)</code> to
+get a displacement along <code>path</code>. (<code>project()</code> works iteratively, and you can
+help it by passing the last displacement as a guess for the next loop
+iteration.) Now the target pose is given by <code>path.get(displacement, 3)</code> where the 3
+indicates that derivatives up to second order are desired. But these derivatives
+aren&rsquo;t quite what <code>compute()</code> wants. They are with respect to the displacement
+instead of time (i.e., we have a <code>Pose2dDual&lt;Arclength&gt;</code> instead of a
+<code>Pose2dDual&lt;Time&gt;</code>). Following the types, there&rsquo;s a method on <code>Pose2dDual&lt;T&gt;</code> that
+does what we want:</p>
+<div class="highlight"><pre tabindex="0" style="color:#f8f8f2;background-color:#272822;-moz-tab-size:4;-o-tab-size:4;tab-size:4;"><code class="language-kotlin" data-lang="kotlin"><span style="display:flex;"><span><span style="color:#66d9ef">fun</span> &lt;<span style="color:#a6e22e">NewParam</span>&gt; <span style="color:#a6e22e">reparam</span>(oldParam: DualNum&lt;NewParam&gt;) =
+</span></span><span style="display:flex;"><span>    Pose2dDual(position.reparam(oldParam), heading.reparam(oldParam))
+</span></span></code></pre></div><p>Now we just need the displacement/arclength as a <code>DualNum&lt;Time&gt;</code>. One way to
+compute that is evaluating a <code>DisplacementProfile</code> at the displacement value
+from <code>project()</code>. It&rsquo;s not quite kinematically correct, though it works when
+<code>actualPose</code> is close to <code>targetPose</code> (which should hopefully be the case). (A
+more correct expression is left as an exercise to the reader. Hint: try taking
+the derivative of the orthogonality constraint between the path
+point/derivatives and the query point.)</p>
+<p>Returning to the practical side, there are additional changes to truly push the
+robot velocity is fast as possible. The velocity command calculation in
+<code>HolonomicController</code> assumes that adding the feedforward command and feedback
+command together will always be feasible (i.e., within physical voltage limits).
+To guarantee this while maximizing the commanded speed of the motors, start by
+computing the feedback</p>
+<div class="highlight"><pre tabindex="0" style="color:#f8f8f2;background-color:#272822;-moz-tab-size:4;-o-tab-size:4;tab-size:4;"><code class="language-kotlin" data-lang="kotlin"><span style="display:flex;"><span><span style="color:#66d9ef">val</span> error = targetPose.<span style="color:#66d9ef">value</span>().minusExp(actualPose)
+</span></span><span style="display:flex;"><span>
+</span></span><span style="display:flex;"><span><span style="color:#66d9ef">val</span> feedbackCommand = PoseVelocity2d(
+</span></span><span style="display:flex;"><span>    Vector2d(
+</span></span><span style="display:flex;"><span>        axialPosGain * error.position.x,
+</span></span><span style="display:flex;"><span>        lateralPosGain * error.position.y,
+</span></span><span style="display:flex;"><span>    ),
+</span></span><span style="display:flex;"><span>    headingGain * error.heading.log(),
+</span></span><span style="display:flex;"><span>) +
+</span></span><span style="display:flex;"><span>PoseVelocity2d(
+</span></span><span style="display:flex;"><span>    Vector2d(
+</span></span><span style="display:flex;"><span>        axialVelGain * velErrorActual.linearVel.x,
+</span></span><span style="display:flex;"><span>        lateralVelGain * velErrorActual.linearVel.y,
+</span></span><span style="display:flex;"><span>    ),
+</span></span><span style="display:flex;"><span>    headingVelGain * velErrorActual.angVel,
+</span></span><span style="display:flex;"><span>)
+</span></span></code></pre></div><p>Then take the raw <code>Pose2dDual&lt;Arclength&gt;</code> from before and compute the maximum
+path displacement velocity/time derivative that satisfies the constraints (the
+commanded voltage for any motor is no larger than the current battery voltage).
+You probably don&rsquo;t care about predicting acceleration in this formulation and
+should operate on the assumption that <code>kA</code> is zero.</p>
+</article>
+ 
+      
+
+
+      <footer class="book-footer">
+        
+  <div class="flex flex-wrap justify-between">
+
+
+
+
+
+</div>
+
+
+
+  <script>(function(){function e(e){const t=window.getSelection(),n=document.createRange();n.selectNodeContents(e),t.removeAllRanges(),t.addRange(n)}document.querySelectorAll("pre code").forEach(t=>{t.addEventListener("click",function(){if(window.getSelection().toString())return;e(t.parentElement),navigator.clipboard&&navigator.clipboard.writeText(t.parentElement.textContent)})})})()</script>
+
+
+ 
+        
+      </footer>
+
+      
+  
+  <div class="book-comments">
+
+</div>
+  
+ 
+
+      <label for="menu-control" class="hidden book-menu-overlay"></label>
+    </div>
+
+    
+    <aside class="book-toc">
+      <div class="book-toc-content">
+        
+  
+<nav id="TableOfContents"></nav>
+
+
+ 
+      </div>
+    </aside>
+    
+  </main>
+
+  
+</body>
+</html>
+
+
+
+
+
+
+
+
+
+
+
+

@@ -16,13 +16,25 @@ _SNAP_GAP_Y = 4.0    # 块与块之间的纵向间距（cm）
 
 
 def block_anchor(end_x, end_y, index):
-    """返回第 index 个执行块在场景坐标中的吸附位置 (x, y)。
+    """返回第 index 个"尾部"执行块在场景坐标中的吸附位置 (x, y)。
 
     视图使用 scale(1,-1) 翻转 Y 轴，屏幕"向下"= 场景 Y 递减。
-    块排列在路径末端右侧，从上往下（= 场景 Y 递减）依次摆放。
+    尾部块排列在路径末端右侧，从上往下（= 场景 Y 递减）依次摆放。
+    尾部块在曲线跑完后才执行。
     """
     x = end_x + _SNAP_GAP_X
     y = end_y - index * (BLOCK_H + _SNAP_GAP_Y)
+    return x, y
+
+
+def block_anchor_head(start_x, start_y, index):
+    """返回第 index 个"头部"执行块在场景坐标中的吸附位置 (x, y)。
+
+    头部块排列在路径起点左侧，从上往下依次摆放。
+    头部块在曲线开始绘制之前先执行。
+    """
+    x = start_x - _SNAP_GAP_X - BLOCK_W
+    y = start_y - index * (BLOCK_H + _SNAP_GAP_Y)
     return x, y
 
 _COLORS = {
@@ -53,9 +65,10 @@ def _default_params(block_type):
     if block_type == "spin":
         return {"degrees": 90, "omega_power": 40}
     if block_type == "motor":
-        return {"motor_id": "M1", "power": 50}
+        return {"motor_id": "M1", "mode": "continuous", "power": 50,
+                "target_deg": 360, "kp": 0.35, "ki": 0.002, "kd": 0.05}
     if block_type == "dc_motor":
-        return {"dc_port": "DC1", "power": 100}
+        return {"dc_port": "DC1", "power": -100}
     if block_type == "oscillate":
         return {"angle_deg": 45.0, "cycles": 3, "speed_power": 50,
                 "strafe_cm": 0.0, "strafe_power": 40, "drift_vy": 0}
@@ -75,11 +88,21 @@ class ActionBlockItem(QtWidgets.QGraphicsObject):
     TYPE_OSCILLATE = "oscillate"
 
     block_changed = QtCore.pyqtSignal()
+    # 拖拽结束后请求场景按 (block, drop_scene_pos) 重新归类到头/尾
+    drop_requested = QtCore.pyqtSignal(object, QtCore.QPointF)
+    # 右键菜单请求把块设为指定锚点：(block, anchor_str)
+    anchor_requested = QtCore.pyqtSignal(object, str)
 
-    def __init__(self, block_type="drive", params=None, order=0, parent=None):
+    # 归属锚点：曲线尾部（跑完后执行）/ 曲线头部（开画前执行）
+    ANCHOR_TAIL = "tail"
+    ANCHOR_HEAD = "head"
+
+    def __init__(self, block_type="drive", params=None, order=0,
+                 anchor="tail", parent=None):
         super().__init__(parent)
         self.block_type = block_type
         self.order = order
+        self.anchor = anchor
         self.params = dict(params) if params else _default_params(block_type)
 
         self.setFlags(
@@ -96,11 +119,35 @@ class ActionBlockItem(QtWidgets.QGraphicsObject):
         super().mousePressEvent(event)
 
     def mouseReleaseEvent(self, event):
-        # 拖拽结束后弹回原位（块应该吸附在路径末端，不允许自由放置）
+        # 拖拽结束：把落点交给场景，由场景决定归到头部还是尾部并重新吸附。
+        # 块不允许自由放置——最终位置总是由 _reposition_blocks 决定。
         if self._drag_start_pos is not None:
+            moved = (self.pos() - self._drag_start_pos).manhattanLength() > 1.0
+            drop_pos = self.pos()
+            # 先弹回原位，避免场景还没重排时块停在半空
             self.setPos(self._drag_start_pos)
             self._drag_start_pos = None
+            if moved:
+                self.drop_requested.emit(self, drop_pos)
         super().mouseReleaseEvent(event)
+
+    def contextMenuEvent(self, event):
+        # 右键菜单：直接把块设为头部/尾部，无需拖拽
+        menu = QtWidgets.QMenu()
+        act_head = menu.addAction("▲ 设为头部（曲线前执行）")
+        act_tail = menu.addAction("▼ 设为尾部（曲线后执行）")
+        act_head.setCheckable(True)
+        act_tail.setCheckable(True)
+        if self.anchor == self.ANCHOR_HEAD:
+            act_head.setChecked(True)
+        else:
+            act_tail.setChecked(True)
+        chosen = menu.exec_(event.screenPos())
+        if chosen is act_head:
+            self.anchor_requested.emit(self, self.ANCHOR_HEAD)
+        elif chosen is act_tail:
+            self.anchor_requested.emit(self, self.ANCHOR_TAIL)
+        event.accept()
 
     def boundingRect(self):
         return QtCore.QRectF(0, 0, BLOCK_W, BLOCK_H)
@@ -193,6 +240,8 @@ class ActionBlockItem(QtWidgets.QGraphicsObject):
         if self.block_type == "spin":
             return "%d° @P%d" % (p.get("degrees", 90), p.get("omega_power", 40))
         if self.block_type == "motor":
+            if str(p.get("mode", "continuous")) == "position":
+                return "%s->%d deg" % (p.get("motor_id", "M1"), int(p.get("target_deg", 0)))
             return "%s @%d%%" % (p.get("motor_id", "M1"), p.get("power", 50))
         if self.block_type == "dc_motor":
             return "%s @%d%%" % (p.get("dc_port", "DC1"), p.get("power", 100))
@@ -260,6 +309,13 @@ class ActionBlockItem(QtWidgets.QGraphicsObject):
                      int(p.get("degrees", 90)),
                      int(p.get("omega_power", 40)))]
         if self.block_type == "motor":
+            if str(p.get("mode", "continuous")) == "position":
+                return [("motor_pos",
+                         str(p.get("motor_id", "M1")),
+                         float(p.get("target_deg", 0.0)),
+                         float(p.get("kp", 0.35)),
+                         float(p.get("ki", 0.002)),
+                         float(p.get("kd", 0.05)))]
             return [("motor",
                      str(p.get("motor_id", "M1")),
                      int(p.get("power", 50)))]
@@ -327,9 +383,10 @@ class ActionBlockItem(QtWidgets.QGraphicsObject):
 
     def _build_strafe_oscillate(self, angle_deg, cycles, power,
                                  strafe_cm, strafe_power, drift_vy=0):
-        """旋转震荡 + 左平移：时间步 (dur, Vx, Vy, omega)
+        """旋转震荡 + 右平移：时间步 (dur, Vx, Vy, omega)
 
-        drift_vy: 前向补偿功率（正=前推），抵消左移时的机械后溜。
+        小车整体偏左，故震荡时向右平移补偿（Vx 正）。
+        drift_vy: 前向补偿功率（正=前推），抵消平移时的机械后溜。
         """
         from .config import (DEFAULT_DEG_PER_SEC_AT_OMEGA50,
                              DEFAULT_CM_PER_SEC_AT_P50, STOP_BUFFER)
@@ -352,17 +409,17 @@ class ActionBlockItem(QtWidgets.QGraphicsObject):
         # 平移功率：power=50 时 30cm/s，线性外推
         cm_per_s_per_power = DEFAULT_CM_PER_SEC_AT_P50 / 50.0
         vx_power = int(round(strafe_speed_cm_s / max(cm_per_s_per_power, 0.01)))
-        vx_power = max(25, min(95, vx_power))  # 左移，Vx 负
+        vx_power = max(25, min(95, vx_power))  # 右移，Vx 正
 
         # 如果 strafe_power 不足以达到所需速度，用 strafe_power 作为上限
-        vx_power = -min(abs(vx_power), abs(strafe_power))
+        vx_power = +min(abs(vx_power), abs(strafe_power))
 
         seq = []
         # 震荡开始 → 自动开启收球电机
         seq.append(("dc_motor", "DC1", -100))
         seq.append(("dc_motor", "DC2", -100))
 
-        # 第1步：初始半程左转 + 左移 + 前向补偿
+        # 第1步：初始半程左转 + 右移 + 前向补偿
         seq.append((round(t_half, 2), vx_power, drift_vy, -power))
         # 中间 cycles 步：全程扫过中点（交替右/左转）
         for i in range(cycles):
@@ -385,6 +442,7 @@ class ActionBlockItem(QtWidgets.QGraphicsObject):
             "block_type": self.block_type,
             "params": dict(self.params),
             "order": self.order,
+            "anchor": self.anchor,
             "x_cm": round(self.pos().x(), 2),
             "y_cm": round(self.pos().y(), 2),
         }
@@ -395,6 +453,7 @@ class ActionBlockItem(QtWidgets.QGraphicsObject):
             block_type=d.get("block_type", "drive"),
             params=d.get("params"),
             order=d.get("order", 0),
+            anchor=d.get("anchor", cls.ANCHOR_TAIL),
         )
         item.setPos(float(d.get("x_cm", 0)), float(d.get("y_cm", 0)))
         return item
@@ -430,8 +489,9 @@ class ActionBlockEditor(QtWidgets.QDialog):
             self._widgets["servo_id_combo"] = sid
 
             angle = QtWidgets.QSpinBox()
-            angle.setRange(0, 270); angle.setSuffix(" deg")
+            angle.setRange(-280, 280); angle.setSuffix(" deg")
             angle.setValue(int(params.get("angle", 90)))
+            angle.setToolTip("舵机目标角度。注意三轮夹爪：0=张开，负=夹紧，正=撑爆有风险（机械极限±280）")
             layout.addRow("目标角度:", angle)
             self._widgets["angle"] = angle
 
@@ -479,12 +539,50 @@ class ActionBlockEditor(QtWidgets.QDialog):
             layout.addRow("电机编号:", mid)
             self._widgets["motor_id_combo"] = mid
 
+            mode = QtWidgets.QComboBox()
+            mode.addItem("持续转动（一直转）", "continuous")
+            mode.addItem("位置闭环（转到目标角度即停）", "position")
+            cur_mode = str(params.get("mode", "continuous"))
+            mi = mode.findData(cur_mode)
+            if mi >= 0:
+                mode.setCurrentIndex(mi)
+            layout.addRow("模式:", mode)
+            self._widgets["motor_mode_combo"] = mode
+
             mpw = QtWidgets.QSpinBox()
             mpw.setRange(-100, 100); mpw.setSuffix(" %")
             mpw.setValue(int(params.get("power", 50)))
-            mpw.setToolTip("正数=正转，负数=反转。设置后电机会一直转！")
-            layout.addRow("电机功率:", mpw)
+            mpw.setToolTip("持续模式：正=正转 负=反转，设置后一直转")
+            layout.addRow("功率(持续):", mpw)
             self._widgets["power"] = mpw
+
+            tgt = QtWidgets.QDoubleSpinBox()
+            tgt.setRange(-100000, 100000); tgt.setDecimals(0); tgt.setSuffix(" deg")
+            tgt.setValue(float(params.get("target_deg", 330)))
+            tgt.setToolTip("位置模式：编码目标角度（度），PID 闭环到位即停；与路径同步启动（边走边做）")
+            layout.addRow("目标角度:", tgt)
+            self._widgets["target_deg"] = tgt
+
+            kp = QtWidgets.QDoubleSpinBox()
+            kp.setRange(0, 10); kp.setDecimals(3); kp.setSingleStep(0.01)
+            kp.setValue(float(params.get("kp", 0.35)))
+            kp.setToolTip("比例系数 Kp（越大越有力，太大会振荡）")
+            layout.addRow("Kp:", kp)
+            self._widgets["kp"] = kp
+
+            ki = QtWidgets.QDoubleSpinBox()
+            ki.setRange(0, 10); ki.setDecimals(4); ki.setSingleStep(0.001)
+            ki.setValue(float(params.get("ki", 0.002)))
+            ki.setToolTip("积分系数 Ki（消除稳态误差，太大会超调）")
+            layout.addRow("Ki:", ki)
+            self._widgets["ki"] = ki
+
+            kd = QtWidgets.QDoubleSpinBox()
+            kd.setRange(0, 10); kd.setDecimals(3); kd.setSingleStep(0.01)
+            kd.setValue(float(params.get("kd", 0.05)))
+            kd.setToolTip("微分系数 Kd（抑制超调）")
+            layout.addRow("Kd:", kd)
+            self._widgets["kd"] = kd
 
         elif block_type == "dc_motor":
             dport = QtWidgets.QComboBox()
@@ -570,6 +668,16 @@ class ActionBlockEditor(QtWidgets.QDialog):
         elif self.block_type == "motor":
             p["motor_id"] = self._widgets["motor_id_combo"].currentText()
             p["power"] = self._widgets["power"].value()
+            if "motor_mode_combo" in self._widgets:
+                p["mode"] = self._widgets["motor_mode_combo"].currentData()
+            if "target_deg" in self._widgets:
+                p["target_deg"] = self._widgets["target_deg"].value()
+            if "kp" in self._widgets:
+                p["kp"] = self._widgets["kp"].value()
+            if "ki" in self._widgets:
+                p["ki"] = self._widgets["ki"].value()
+            if "kd" in self._widgets:
+                p["kd"] = self._widgets["kd"].value()
         elif self.block_type == "dc_motor":
             p["dc_port"] = self._widgets["dc_port_combo"].currentText()
             p["power"] = self._widgets["power"].value()

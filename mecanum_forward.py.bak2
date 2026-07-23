@@ -1,0 +1,1701 @@
+import novapi
+import time
+import math
+from mbuild import gamepad
+from mbuild import power_expand_board
+from mbuild.encoder_motor import encoder_motor_class
+from mbuild.led_matrix import led_matrix_class
+
+def _safe_print(msg=''):
+    pass
+print = _safe_print
+from mbuild.smartservo import smartservo_class
+_HAS_SERVO = True
+SPEED_SCALE = 0.85
+DEAD_ZONE = 3
+VY_BOOST = 1.4
+LOOP_DELAY = 0.02
+STICK_LOW_PIVOT = 25
+STICK_LOW_OUT = 18
+STICK_HIGH_EXPO = 1.7
+SQRT3_OVER_2 = 0.866
+HALF = 0.5
+AUTO_SPEED = 50
+AUTO_STEP_DELAY = 0.02
+DC_COLLECTOR_PORT = 'DC1'
+DC_COLLECTOR_SPEED = -100
+BL_ACTION_SPEED = 80
+BL_SPINUP_DELAY = 0.1
+LED_PORT = 'PORT2'
+LED_INDEX = 'INDEX1'
+DEBUG_TEST_SPEED = 50
+DEBUG_MOTOR_TYPES = ['编码电机', '直流电机', '升降臂', '舵机', '无刷电机']
+DEBUG_MOTOR_NAMES = ['M1', 'M2', 'M3', 'M4', 'M5']
+DEBUG_DC_NAMES = ['DC1']
+DEBUG_BLDC_NAMES = ['BL1', 'BL2', 'BL12']
+DEBUG_LIFT_GEARS = [0, 330, 660]
+DEBUG_LIFT_NAMES = ['L0', 'L1', 'L2']
+DEBUG_LIFT_SPEED = 80
+DEBUG_SERVO_NAMES = ['SV1', 'SV2']
+DEBUG_SERVO_ANGLE = 40
+SERVO_MAX_ANGLE = 280
+SERVO_MOVE_SPEED = 30
+GRIP_SPEED_THRESHOLD = 5
+GRIP_CLOSE_POWER = -25
+GRIP_TIMEOUT = 5.0
+GRIP_SETTLE_TIME = 0.3
+KEY_FUNC_A = 'N2'
+KEY_FUNC_B = 'R2'
+FACE_LIFT_MOTOR = [None, 1, 0]
+FACE_GRIP_SERVO = [None, 0, 1]
+LIFT_DIR = [1, -1]
+LIFT_ENCODER_SIGN = [1, -1]
+DEBUG_ALL_NAMES = [DEBUG_MOTOR_NAMES, DEBUG_DC_NAMES, DEBUG_LIFT_NAMES, DEBUG_SERVO_NAMES, DEBUG_BLDC_NAMES]
+LIFT_PID_KP = 0.7
+LIFT_PID_KI = 0.08
+LIFT_PID_KD = 0.02
+LIFT_MAX_SPEED = 100
+LIFT_MIN_SPEED = 40
+LIFT_MIN_SPEED_DOWN = 45
+LIFT_DEADBAND = 6
+LIFT_SETTLE_TIME = 0.3
+LIFT_TIMEOUT = 3.0
+LIFT_DECEL_ZONE = 0.35
+LIFT_FINE_STEP = 15
+LIFT_HOMING_SPEED = -50
+LIFT_HOMING_STALL_TIME = 0.3
+CAL_DEG_PER_CM = 1000 / 58
+CAL_TARGET_CM = 20
+CAL_ANGLE = int(CAL_TARGET_CM * CAL_DEG_PER_CM)
+CAL_MOVE_SPEED = 20
+CAL_RAMP_UP = 0.4
+CAL_RAMP_DOWN = 0.2
+CAL_PID_KP = 0.16
+COS120 = -0.5
+SIN120 = 0.866
+FACE_ROTATIONS = [(1.0, 0.0, 0.0, 1.0), (COS120, -SIN120, SIN120, COS120), (COS120, SIN120, -SIN120, COS120)]
+FACE_NAMES = ['Face0: M1-M2 正面', 'Face1: M2-M3 正面', 'Face2: M3-M1 正面']
+__led = led_matrix_class(LED_PORT, LED_INDEX)
+__motor_M1 = encoder_motor_class('M1', 'INDEX1')
+__motor_M2 = encoder_motor_class('M2', 'INDEX1')
+__motor_M3 = encoder_motor_class('M3', 'INDEX1')
+__motor_M4 = encoder_motor_class('M4', 'INDEX1')
+__motor_M5 = encoder_motor_class('M5', 'INDEX1')
+__servo_1 = smartservo_class('M6', 'INDEX1')
+__servo_2 = smartservo_class('M6', 'INDEX2')
+face = 0
+AUTO_RAMP_MS = 0
+AUTO_ACCEL_MS = 0
+ENCODER_TICKS_PER_CM = 9.4760
+INVERT_VX = False
+INVERT_VY = True
+INVERT_OMEGA = False
+_DEG_PER_CM = ENCODER_TICKS_PER_CM
+_TICKS_TO_DEG = 1.0
+PROFILE_DEADBAND_DEG = 8
+_ENC_STEP_TIMEOUT = 8.0
+_RPM_PER_POWER = 8.0
+FACE_ROTATE_WHEEL_DEG = 940
+FACE_ROTATE_PID_KP = 0.2
+FACE_ROTATE_PID_KI = 0.001
+FACE_ROTATE_PID_KD = 0.02
+FACE_ROTATE_MAX_SPEED = 78
+FACE_ROTATE_MIN_SPEED = 12
+FACE_ROTATE_DEADBAND = 8
+FACE_ROTATE_TIMEOUT = 0.6
+FACE_ROTATE_SETTLE_TIME = 0.3
+FACE_ROTATE_DECEL_ZONE = 0.4
+FACE_SHOW_MS = 800
+FRONT_BACK_COMPENSATION = 0.0000
+ROTATION_BALANCE = 0.0000
+STRAFE_VY_COUPLING = 0.0000
+collector_on = False
+lift_gear = [0, 0]
+lift_fine_offset = [0, 0]
+bl1_on = False
+bl2_on = False
+_grip_active = [False, False]
+_grip_closing = [False, False]
+_grip_hold = [False, False]
+_grip_start_time = [0.0, 0.0]
+_grip_settled = [False, False]
+_grip_last_print = [0.0, 0.0]
+_lift_pid_active = [False, False]
+_lift_pid_target = [0.0, 0.0]
+_lift_pid_integral = [0.0, 0.0]
+_lift_pid_last_error = [0.0, 0.0]
+_lift_pid_last_time = [0.0, 0.0]
+_lift_pid_settle_start = [0.0, 0.0]
+_lift_pid_settled = [False, False]
+_lift_pid_start_time = [0.0, 0.0]
+_lift_zero_offset = [0.0, 0.0]
+_lift_homing = [False, False]
+_lift_homing_last_angle = [0.0, 0.0]
+_lift_homing_stall_start = [0.0, 0.0]
+face_rotating = False
+face_rot_start_enc = [0, 0, 0]
+face_rot_target_deg = 0.0
+face_rot_pid_integral = 0.0
+face_rot_last_error = 0.0
+face_rot_last_time = 0.0
+face_rot_settle_start = 0.0
+face_rot_settled = False
+face_rot_start_time = 0.0
+face_show_until = 0.0
+debug_mode = False
+debug_motor_type = 0
+debug_motor_index = 0
+debug_show_speed_until = 0.0
+debug_show_ok = False
+debug_cal_mode = False
+debug_cal_running = False
+debug_cal_M1_start = 0.0
+debug_cal_M2_start = 0.0
+debug_cal_M3_start = 0.0
+debug_cal_M1_target = 0.0
+debug_cal_M2_target = 0.0
+debug_cal_done_time = 0.0
+debug_cal_auto_start = False
+debug_cal_auto_time = 0.0
+debug_lift_gear_index = 0
+servo_dir = -1
+_dpad_lr_conflict = 0
+_dpad_ud_conflict = 0
+_cal_delta_M1 = None
+_cal_delta_M2 = None
+_cal_delta_M3 = None
+_cal_delta_M4 = None
+_debug_cal_done = False
+_cal_display_until = 0.0
+_CAL_DISPLAY_HOLD_S = 4.0
+_enc_cal_auto_started = False
+_enc_cal_M1_start = 0.0
+_enc_cal_M2_start = 0.0
+_enc_cal_M3_start = 0.0
+
+def apply_response_curve(value, max_input=100.0):
+    if value == 0:
+        return 0.0
+    sign = 1.0 if value > 0 else -1.0
+    x = abs(value)
+    if x <= STICK_LOW_PIVOT:
+        y = STICK_LOW_OUT * x / STICK_LOW_PIVOT
+    else:
+        t = (x - STICK_LOW_PIVOT) / (max_input - STICK_LOW_PIVOT)
+        y = STICK_LOW_OUT + (max_input - STICK_LOW_OUT) * t ** STICK_HIGH_EXPO
+    return sign * y
+
+def rotate_velocity(Vx, Vy, face_index):
+    c, ns, s, nc = FACE_ROTATIONS[face_index]
+    return (c * Vx + ns * Vy, s * Vx + nc * Vy)
+
+def omni_kinematics(Vx, Vy, omega):
+    M1 = -HALF * Vx - SQRT3_OVER_2 * Vy - omega
+    M2 = -HALF * Vx + SQRT3_OVER_2 * Vy - omega
+    M3 = Vx - omega
+    max_abs = max(abs(M1), abs(M2), abs(M3))
+    if max_abs > 100:
+        scale = 100.0 / max_abs
+        M1 *= scale
+        M2 *= scale
+        M3 *= scale
+    return (M1, M2, M3)
+
+def apply_dead_zone(value, threshold=DEAD_ZONE):
+    if abs(value) < threshold:
+        return 0
+    return value
+
+def stop_all_motors():
+    __motor_M1.set_power(0)
+    __motor_M2.set_power(0)
+    __motor_M3.set_power(0)
+    __motor_M4.set_power(0)
+    __motor_M5.set_power(0)
+    power_expand_board.stop('BL1')
+    power_expand_board.stop('BL2')
+    __servo_1.set_power(0)
+    __servo_2.set_power(0)
+
+def debug_stop_motor():
+    if debug_motor_type == 0:
+        motor = [__motor_M1, __motor_M2, __motor_M3, __motor_M4, __motor_M5][debug_motor_index]
+        motor.set_power(0)
+    elif debug_motor_type == 1:
+        power_expand_board.set_power(DC_COLLECTOR_PORT, 0)
+    elif debug_motor_type == 2:
+        pass
+    elif debug_motor_type == 3:
+        if _HAS_SERVO:
+            servo = [__servo_1, __servo_2][debug_motor_index]
+            servo.set_power(0)
+    elif debug_motor_type == 4:
+        if debug_motor_index == 2:
+            power_expand_board.stop('BL1')
+            power_expand_board.stop('BL2')
+            power_expand_board.set_power(DC_COLLECTOR_PORT, 0)
+        else:
+            port = ['BL1', 'BL2'][debug_motor_index]
+            power_expand_board.stop(port)
+
+def debug_cal_start(angle):
+    global debug_cal_running, debug_cal_M1_start, debug_cal_M2_start, debug_cal_M3_start
+    global debug_cal_M1_target, debug_cal_M2_target
+    _reset_drive_encoder_reference('debug_cal')
+    debug_cal_M1_start = __motor_M1.get_value('angle')
+    debug_cal_M2_start = __motor_M2.get_value('angle')
+    debug_cal_M3_start = __motor_M3.get_value('angle')
+    debug_cal_M1_target = -SQRT3_OVER_2 * angle
+    debug_cal_M2_target = SQRT3_OVER_2 * angle
+    debug_cal_running = True
+    pass
+
+DEBUG_CAL_TIMEOUT = 5.0
+
+_debug_cal_tick_start = 0.0
+def debug_cal_tick():
+    global debug_cal_running, debug_cal_done_time
+    global _cal_delta_M1, _cal_delta_M2, _cal_delta_M3, _cal_delta_M4, _debug_cal_done
+    global _debug_cal_tick_start
+    if _debug_cal_tick_start == 0:
+        _debug_cal_tick_start = novapi.timer()
+    if novapi.timer() - _debug_cal_tick_start > DEBUG_CAL_TIMEOUT:
+        __motor_M1.set_power(0)
+        __motor_M2.set_power(0)
+        debug_cal_running = False
+        _debug_cal_tick_start = 0
+        return True
+    M1_cur = __motor_M1.get_value('angle') - debug_cal_M1_start
+    M2_cur = __motor_M2.get_value('angle') - debug_cal_M2_start
+    if abs(debug_cal_M1_target) > 0.1:
+        progress_M1 = abs(M1_cur / debug_cal_M1_target)
+    else:
+        progress_M1 = 1.0
+    if abs(debug_cal_M2_target) > 0.1:
+        progress_M2 = abs(M2_cur / debug_cal_M2_target)
+    else:
+        progress_M2 = 1.0
+    progress = min(progress_M1, progress_M2)
+    if progress >= 0.995:
+        __motor_M1.set_power(0)
+        __motor_M2.set_power(0)
+        debug_cal_running = False
+        debug_cal_done_time = novapi.timer()
+        debug_cal_auto_start = False
+        _debug_cal_tick_start = 0
+        M1_final = __motor_M1.get_value('angle') - debug_cal_M1_start
+        M2_final = __motor_M2.get_value('angle') - debug_cal_M2_start
+        _cal_delta_M1 = M1_final
+        _cal_delta_M2 = M2_final
+        _cal_delta_M3 = __motor_M3.get_value('angle') - debug_cal_M3_start
+        _cal_delta_M4 = None
+        _debug_cal_done = True
+        _show_cal_delta(1, _cal_delta_M1)
+        pass
+        return False
+    if progress < CAL_RAMP_UP:
+        factor = 0.15 + 0.85 * math.sin(progress / CAL_RAMP_UP * math.pi / 2.0)
+    elif progress < 1.0 - CAL_RAMP_DOWN:
+        factor = 1.0
+    else:
+        p_dec = (progress - (1.0 - CAL_RAMP_DOWN)) / CAL_RAMP_DOWN
+        factor = 0.15 + 0.85 * math.cos(p_dec * math.pi / 2.0)
+    base_speed = CAL_MOVE_SPEED * factor
+    error = progress_M1 - progress_M2
+    correction = CAL_PID_KP * error * CAL_MOVE_SPEED
+    M1_speed = base_speed - correction
+    M2_speed = base_speed + correction
+    M1_power = max(-100, min(100, M1_speed if debug_cal_M1_target > 0 else -M1_speed))
+    M2_power = max(-100, min(100, M2_speed if debug_cal_M2_target > 0 else -M2_speed))
+    if abs(M1_power) < 15 and progress < 0.9:
+        M1_power = 15 if debug_cal_M1_target > 0 else -15
+    if abs(M2_power) < 15 and progress < 0.9:
+        M2_power = 15 if debug_cal_M2_target > 0 else -15
+    __motor_M1.set_power(M1_power)
+    __motor_M2.set_power(M2_power)
+    return True
+
+def _get_motors():
+    global _motors
+    if _motors is None:
+        _motors = [__motor_M1, __motor_M2, __motor_M3]
+    return _motors
+
+def _read_motor_angles(motors):
+    vals = []
+    for m in motors:
+        try:
+            v = m.get_value('angle')
+            if v is None:
+                v = 0
+            vals.append(v)
+        except Exception:
+            vals.append(0)
+    return vals
+
+def _reset_drive_encoder_reference(reason='auto'):
+    global _enc_targets, _enc_step_initialized, _enc_step_start_time
+    motors = _get_motors()
+    for m in motors:
+        try:
+            m.set_power(0)
+        except Exception:
+            pass
+    time.sleep(0.05)
+    reset_count = 0
+    starts = _read_motor_angles(motors)
+    _enc_targets = [int(v) for v in starts]
+    _enc_step_initialized = -1
+    _enc_step_start_time = novapi.timer()
+    pass
+
+def _show_cal_delta(motor_idx, value):
+    global _cal_display_until
+    if value is None:
+        __led.show('NONE')
+        pass
+    else:
+        delta = int(value)
+        __led.show('E%d' % delta)
+        pass
+    _cal_display_until = novapi.timer() + _CAL_DISPLAY_HOLD_S
+
+def face_rotate_start():
+    global face_rotating, face_rot_start_enc, face_rot_target_deg
+    global face_rot_pid_integral, face_rot_last_error, face_rot_last_time
+    global face_rot_settle_start, face_rot_settled, face_rot_start_time
+    face_rot_start_enc = [__motor_M1.get_value('angle'), __motor_M2.get_value('angle'), __motor_M3.get_value('angle')]
+    face_rot_target_deg = FACE_ROTATE_WHEEL_DEG
+    face_rot_pid_integral = 0.0
+    face_rot_last_error = 0.0
+    face_rot_last_time = novapi.timer()
+    face_rot_settle_start = 0.0
+    face_rot_settled = False
+    face_rot_start_time = novapi.timer()
+    face_rotating = True
+    pass
+
+def face_rotate_tick():
+    global face_rotating, face_rot_pid_integral, face_rot_last_error
+    global face_rot_last_time, face_rot_settle_start, face_rot_settled
+    now = novapi.timer()
+    if now - face_rot_start_time > FACE_ROTATE_TIMEOUT:
+        stop_all_motors()
+        face_rotating = False
+        pass
+        return True
+    M1_delta = abs(__motor_M1.get_value('angle') - face_rot_start_enc[0])
+    M2_delta = abs(__motor_M2.get_value('angle') - face_rot_start_enc[1])
+    M3_delta = abs(__motor_M3.get_value('angle') - face_rot_start_enc[2])
+    avg_delta = (M1_delta + M2_delta + M3_delta) / 3.0
+    error = face_rot_target_deg - avg_delta
+    if abs(error) <= FACE_ROTATE_DEADBAND:
+        if not face_rot_settled:
+            face_rot_settled = True
+            face_rot_settle_start = now
+        elif now - face_rot_settle_start >= FACE_ROTATE_SETTLE_TIME:
+            stop_all_motors()
+            face_rotating = False
+            pass
+            return True
+        stop_all_motors()
+        face_rot_pid_integral = 0.0
+        face_rot_last_error = 0.0
+        return False
+    else:
+        face_rot_settled = False
+        face_rot_settle_start = 0.0
+    dt = now - face_rot_last_time
+    if dt <= 0:
+        dt = LOOP_DELAY
+    face_rot_last_time = now
+    if FACE_ROTATE_PID_KI > 0:
+        face_rot_pid_integral += error * dt
+        max_integral = FACE_ROTATE_MAX_SPEED / FACE_ROTATE_PID_KI
+        face_rot_pid_integral = max(-max_integral, min(max_integral, face_rot_pid_integral))
+    derivative = (error - face_rot_last_error) / dt if dt > 0 else 0
+    face_rot_last_error = error
+    omega = FACE_ROTATE_PID_KP * error + FACE_ROTATE_PID_KI * face_rot_pid_integral + FACE_ROTATE_PID_KD * derivative
+    decel_threshold = face_rot_target_deg * FACE_ROTATE_DECEL_ZONE
+    if 0 < error < decel_threshold:
+        decel_progress = 1.0 - error / decel_threshold
+        speed_limit = FACE_ROTATE_MIN_SPEED + (FACE_ROTATE_MAX_SPEED - FACE_ROTATE_MIN_SPEED) * math.cos(decel_progress * math.pi / 2.0)
+        omega = max(-speed_limit, min(speed_limit, omega))
+    omega = max(-FACE_ROTATE_MAX_SPEED, min(FACE_ROTATE_MAX_SPEED, omega))
+    if abs(omega) < FACE_ROTATE_MIN_SPEED and abs(error) > FACE_ROTATE_DEADBAND:
+        omega = FACE_ROTATE_MIN_SPEED if error > 0 else -FACE_ROTATE_MIN_SPEED
+    omega = -omega
+    M1p, M2p, M3p = omni_kinematics(0, 0, omega)
+    __motor_M1.set_power(M1p)
+    __motor_M2.set_power(M2p)
+    __motor_M3.set_power(M3p)
+    return False
+_LIFT_MOTORS = [None, None]
+
+def _init_lift_motors():
+    global _LIFT_MOTORS
+    if _LIFT_MOTORS[0] is None:
+        _LIFT_MOTORS = [__motor_M4, __motor_M5]
+
+def lift_pid_start(motor_idx, target_deg):
+    global _lift_pid_active, _lift_pid_target
+    global _lift_pid_integral, _lift_pid_last_error, _lift_pid_last_time
+    global _lift_pid_settle_start, _lift_pid_settled, _lift_pid_start_time
+    _init_lift_motors()
+    if _LIFT_MOTORS[motor_idx] is None:
+        _lift_pid_active[motor_idx] = False
+        __led.show('noM')
+        return
+    _lift_pid_target[motor_idx] = target_deg
+    _lift_pid_integral[motor_idx] = 0.0
+    _lift_pid_last_error[motor_idx] = 0.0
+    _lift_pid_last_time[motor_idx] = novapi.timer()
+    _lift_pid_settle_start[motor_idx] = 0.0
+    _lift_pid_settled[motor_idx] = False
+    _lift_pid_start_time[motor_idx] = novapi.timer()
+    _lift_pid_active[motor_idx] = True
+
+def lift_pid_tick(motor_idx):
+    global _lift_pid_integral, _lift_pid_last_error, _lift_pid_last_time
+    global _lift_pid_settle_start, _lift_pid_settled, _lift_pid_active
+    _init_lift_motors()
+    motor = _LIFT_MOTORS[motor_idx]
+    if motor is None:
+        _lift_pid_active[motor_idx] = False
+        return True
+    if not _lift_pid_active[motor_idx]:
+        return True
+    now = novapi.timer()
+    if now - _lift_pid_start_time[motor_idx] > LIFT_TIMEOUT:
+        motor.set_power(0)
+        _lift_pid_active[motor_idx] = False
+        arm_name = 'M4二号臂' if motor_idx == 0 else 'M5一号臂'
+        pass
+        return True
+    cur_deg = motor.get_value('angle') * LIFT_ENCODER_SIGN[motor_idx] - _lift_zero_offset[motor_idx]
+    error = _lift_pid_target[motor_idx] - cur_deg
+    if abs(error) <= LIFT_DEADBAND:
+        if not _lift_pid_settled[motor_idx]:
+            _lift_pid_settled[motor_idx] = True
+            _lift_pid_settle_start[motor_idx] = now
+        elif now - _lift_pid_settle_start[motor_idx] >= LIFT_SETTLE_TIME:
+            motor.set_power(0)
+            _lift_pid_active[motor_idx] = False
+            _lift_pid_settled[motor_idx] = False
+            arm_name = 'M4' if motor_idx == 0 else 'M5'
+            pass
+            return True
+        motor.set_power(0)
+        _lift_pid_integral[motor_idx] = 0.0
+        _lift_pid_last_error[motor_idx] = 0.0
+        return False
+    else:
+        _lift_pid_settled[motor_idx] = False
+        _lift_pid_settle_start[motor_idx] = 0.0
+    dt = now - _lift_pid_last_time[motor_idx]
+    if dt <= 0:
+        dt = LOOP_DELAY
+    _lift_pid_last_time[motor_idx] = now
+    if LIFT_PID_KI > 0:
+        _lift_pid_integral[motor_idx] += error * dt
+        max_integral = LIFT_MAX_SPEED / LIFT_PID_KI
+        _lift_pid_integral[motor_idx] = max(-max_integral, min(max_integral, _lift_pid_integral[motor_idx]))
+    derivative = (error - _lift_pid_last_error[motor_idx]) / dt if dt > 0 else 0
+    _lift_pid_last_error[motor_idx] = error
+    power = LIFT_PID_KP * error + LIFT_PID_KI * _lift_pid_integral[motor_idx] + LIFT_PID_KD * derivative
+    eff_min_speed = LIFT_MIN_SPEED if error > 0 else LIFT_MIN_SPEED_DOWN
+    decel_threshold = max(abs(_lift_pid_target[motor_idx]) * LIFT_DECEL_ZONE, LIFT_DEADBAND * 4)
+    if abs(error) < decel_threshold:
+        decel_progress = 1.0 - abs(error) / max(decel_threshold, 1.0)
+        speed_limit = eff_min_speed + (LIFT_MAX_SPEED - eff_min_speed) * math.cos(decel_progress * math.pi / 2.0)
+        power = max(-speed_limit, min(speed_limit, power))
+    power = max(-LIFT_MAX_SPEED, min(LIFT_MAX_SPEED, power))
+    if abs(power) < eff_min_speed and abs(error) > LIFT_DEADBAND:
+        power = eff_min_speed if error > 0 else -eff_min_speed
+    power *= LIFT_DIR[motor_idx]
+    motor.set_power(power)
+    return False
+
+def lift_pid_tick_all():
+    lift_pid_tick(0)
+    lift_pid_tick(1)
+
+
+def _lift_homing_tick(motor_idx):
+    global _lift_homing, _lift_homing_last_angle, _lift_homing_stall_start, _lift_zero_offset
+    global _lift_pid_active
+    _init_lift_motors()
+    motor = _LIFT_MOTORS[motor_idx]
+    if motor is None:
+        _lift_homing[motor_idx] = False
+        return
+    if not _lift_homing[motor_idx]:
+        return
+    raw_angle = motor.get_value('angle')
+    now = novapi.timer()
+    if abs(raw_angle - _lift_homing_last_angle[motor_idx]) < 0.5:
+        if _lift_homing_stall_start[motor_idx] == 0:
+            _lift_homing_stall_start[motor_idx] = now
+        elif now - _lift_homing_stall_start[motor_idx] >= LIFT_HOMING_STALL_TIME:
+            motor.set_power(0)
+            _lift_zero_offset[motor_idx] = raw_angle * LIFT_ENCODER_SIGN[motor_idx]
+            _lift_homing[motor_idx] = False
+            _lift_homing_stall_start[motor_idx] = 0
+            _lift_pid_active[motor_idx] = False
+            return
+    else:
+        _lift_homing_stall_start[motor_idx] = 0
+    _lift_homing_last_angle[motor_idx] = raw_angle
+    motor.set_power(LIFT_HOMING_SPEED * LIFT_DIR[motor_idx])
+
+
+def _lift_homing_tick_all():
+    _lift_homing_tick(0)
+    _lift_homing_tick(1)
+
+
+def _lift_start_homing(motor_idx):
+    global _lift_homing, _lift_homing_last_angle, _lift_homing_stall_start
+    _init_lift_motors()
+    if _LIFT_MOTORS[motor_idx] is None:
+        return
+    _lift_homing[motor_idx] = True
+    _lift_homing_last_angle[motor_idx] = _LIFT_MOTORS[motor_idx].get_value('angle')
+    _lift_homing_stall_start[motor_idx] = 0
+
+
+_MPOS_MOTORS = None
+
+def _get_pos_motors():
+    global _MPOS_MOTORS
+    if _MPOS_MOTORS is None:
+        _MPOS_MOTORS = [__motor_M1, __motor_M2, __motor_M3, __motor_M4, __motor_M5]
+    return _MPOS_MOTORS
+MOTOR_POS_MAX_SPEED = 100
+MOTOR_POS_MIN_SPEED = 20
+MOTOR_POS_DEADBAND = 6
+MOTOR_POS_SETTLE_TIME = 0.25
+MOTOR_POS_TIMEOUT = 5.0
+MOTOR_POS_DECEL_ZONE = 0.35
+_mpos_active = [False, False, False, False, False]
+_mpos_target = [0.0, 0.0, 0.0, 0.0, 0.0]
+_mpos_kp = [0.0, 0.0, 0.0, 0.0, 0.0]
+_mpos_ki = [0.0, 0.0, 0.0, 0.0, 0.0]
+_mpos_kd = [0.0, 0.0, 0.0, 0.0, 0.0]
+_mpos_integral = [0.0, 0.0, 0.0, 0.0, 0.0]
+_mpos_last_error = [0.0, 0.0, 0.0, 0.0, 0.0]
+_mpos_last_time = [0.0, 0.0, 0.0, 0.0, 0.0]
+_mpos_settle_start = [0.0, 0.0, 0.0, 0.0, 0.0]
+_mpos_settled = [False, False, False, False, False]
+_mpos_start_time = [0.0, 0.0, 0.0, 0.0, 0.0]
+_MOTOR_IDX = {'M1': 0, 'M2': 1, 'M3': 2, 'M4': 3, 'M5': 4}
+
+def motor_pos_start(motor_id, target_deg, kp, ki, kd):
+    idx = _MOTOR_IDX.get(str(motor_id))
+    if idx is None:
+        return
+    motors = _get_pos_motors()
+    if motors[idx] is None:
+        _mpos_active[idx] = False
+        return
+    _mpos_target[idx] = float(target_deg)
+    _mpos_kp[idx] = float(kp)
+    _mpos_ki[idx] = float(ki)
+    _mpos_kd[idx] = float(kd)
+    _mpos_integral[idx] = 0.0
+    _mpos_last_error[idx] = 0.0
+    _mpos_last_time[idx] = novapi.timer()
+    _mpos_settle_start[idx] = 0.0
+    _mpos_settled[idx] = False
+    _mpos_start_time[idx] = novapi.timer()
+    _mpos_active[idx] = True
+
+def motor_pos_tick(idx):
+    motors = _get_pos_motors()
+    motor = motors[idx]
+    if motor is None:
+        _mpos_active[idx] = False
+        return True
+    if not _mpos_active[idx]:
+        return True
+    now = novapi.timer()
+    if now - _mpos_start_time[idx] > MOTOR_POS_TIMEOUT:
+        motor.set_power(0)
+        _mpos_active[idx] = False
+        return True
+    try:
+        cur_deg = motor.get_value('angle')
+        if cur_deg is None:
+            cur_deg = 0
+    except Exception:
+        cur_deg = 0
+    error = _mpos_target[idx] - cur_deg
+    if abs(error) <= MOTOR_POS_DEADBAND:
+        if not _mpos_settled[idx]:
+            _mpos_settled[idx] = True
+            _mpos_settle_start[idx] = now
+        elif now - _mpos_settle_start[idx] >= MOTOR_POS_SETTLE_TIME:
+            motor.set_power(0)
+            _mpos_active[idx] = False
+            _mpos_settled[idx] = False
+            return True
+        motor.set_power(0)
+        _mpos_integral[idx] = 0.0
+        _mpos_last_error[idx] = 0.0
+        return False
+    else:
+        _mpos_settled[idx] = False
+        _mpos_settle_start[idx] = 0.0
+    dt = now - _mpos_last_time[idx]
+    if dt <= 0:
+        dt = 0.02
+    _mpos_last_time[idx] = now
+    ki = _mpos_ki[idx]
+    if ki > 0:
+        _mpos_integral[idx] += error * dt
+        max_integral = MOTOR_POS_MAX_SPEED / ki
+        _mpos_integral[idx] = max(-max_integral, min(max_integral, _mpos_integral[idx]))
+    derivative = (error - _mpos_last_error[idx]) / dt if dt > 0 else 0
+    _mpos_last_error[idx] = error
+    power = _mpos_kp[idx] * error + ki * _mpos_integral[idx] + _mpos_kd[idx] * derivative
+    decel_threshold = max(abs(_mpos_target[idx]) * MOTOR_POS_DECEL_ZONE, MOTOR_POS_DEADBAND * 4)
+    if abs(error) < decel_threshold:
+        decel_progress = 1.0 - abs(error) / max(decel_threshold, 1.0)
+        speed_limit = MOTOR_POS_MIN_SPEED + (MOTOR_POS_MAX_SPEED - MOTOR_POS_MIN_SPEED) * math.cos(decel_progress * math.pi / 2.0)
+        power = max(-speed_limit, min(speed_limit, power))
+    power = max(-MOTOR_POS_MAX_SPEED, min(MOTOR_POS_MAX_SPEED, power))
+    if abs(power) < MOTOR_POS_MIN_SPEED and abs(error) > MOTOR_POS_DEADBAND:
+        power = MOTOR_POS_MIN_SPEED if error > 0 else -MOTOR_POS_MIN_SPEED
+    try:
+        motor.set_power(power)
+    except Exception:
+        pass
+    return False
+
+def motor_pos_tick_all():
+    for _i in range(5):
+        if _mpos_active[_i]:
+            motor_pos_tick(_i)
+last_R1 = False
+last_L1 = False
+last_Plus = False
+last_Menu = False
+last_N1 = False
+last_Up = False
+last_Down = False
+last_Left = False
+last_Right = False
+last_N2 = False
+last_N3 = False
+last_N4 = False
+last_R2 = False
+last_L2 = False
+last_L1_debug = False
+last_R1_debug = False
+last_Dpad_Up_norm = False
+last_Dpad_Down_norm = False
+last_Dpad_Left_norm = False
+last_Dpad_Right_norm = False
+__led.show('Main')
+novapi.reset_timer()
+while True:
+    if False:
+        if tag == 'encoder_cal':
+                _, cal_dur, cal_Vx, cal_Vy, cal_omega = step
+                if not _enc_cal_auto_started:
+                    _reset_drive_encoder_reference('encoder_cal')
+                    _starts = _read_motor_angles(_get_motors())
+                    _enc_cal_M1_start = _starts[0]
+                    _enc_cal_M2_start = _starts[1]
+                    _enc_cal_M3_start = _starts[2]
+                    auto_step_start = novapi.timer()
+                    _enc_cal_auto_started = True
+                    pass
+                if elapsed >= cal_dur:
+                    M1_end = __motor_M1.get_value('angle')
+                    M2_end = __motor_M2.get_value('angle')
+                    M3_end = __motor_M3.get_value('angle')
+                    _cal_delta_M1 = M1_end - _enc_cal_M1_start
+                    _cal_delta_M2 = M2_end - _enc_cal_M2_start
+                    _cal_delta_M3 = M3_end - _enc_cal_M3_start
+                    _cal_delta_M4 = None
+                    _debug_cal_done = True
+                    _enc_cal_auto_started = False
+                    stop_all_motors()
+                    auto_mode = False
+                    auto_step = 0
+                    _show_cal_delta(1, _cal_delta_M1)
+                    pass
+                    pass
+                else:
+                    _cvx, _cvy = rotate_velocity(cal_Vx, cal_Vy, face)
+                    if INVERT_VX:
+                        _cvx = -_cvx
+                    if INVERT_VY:
+                        _cvy = -_cvy
+                    _cw = cal_omega
+                    if INVERT_OMEGA:
+                        _cw = -_cw
+                    M1p, M2p, M3p = omni_kinematics(_cvx, _cvy, _cw)
+                    __motor_M1.set_power(M1p)
+                    __motor_M2.set_power(M2p)
+                    __motor_M3.set_power(M3p)
+            elif tag == 'enc_flow':
+                _, total_ticks, vy_power, vx_power = step
+                if _enc_step_initialized != auto_step:
+                    _enc_flow_start(total_ticks, vy_power, vx_power)
+                    _enc_step_initialized = auto_step
+                next_step = AUTO_SEQUENCE[auto_step + 1] if auto_step + 1 < len(AUTO_SEQUENCE) else None
+                next_is_flow = (next_step is not None
+                                and isinstance(next_step[0], str)
+                                and next_step[0] == 'enc_flow')
+                if _enc_flow_tick(is_last=(not next_is_flow)):
+                    auto_step += 1
+                    if auto_step >= len(AUTO_SEQUENCE):
+                        auto_mode = False
+                        auto_step = 0
+                        stop_all_motors()
+                    else:
+                        auto_step_start = novapi.timer()
+            elif tag == 'enc_move':
+                _, total_ticks, vy_power, vx_power = step
+                if _enc_step_initialized != auto_step:
+                    try:
+                        _enc_move_start(total_ticks, vy_power, vx_power)
+                    except Exception:
+                        stop_all_motors()
+                        auto_mode = False
+                        auto_step = 0
+                        _enc_step_initialized = -1
+                        __led.show('ERR')
+                        time.sleep(0.2)
+                        continue
+                    _enc_step_initialized = auto_step
+                next_step = AUTO_SEQUENCE[auto_step + 1] if auto_step + 1 < len(AUTO_SEQUENCE) else None
+                next_is_enc_move = next_step is not None and isinstance(next_step[0], str) and (next_step[0] == 'enc_move')
+                if _enc_move_tick(max(abs(vy_power), abs(vx_power)), stop_motors=not next_is_enc_move):
+                    auto_step += 1
+                    if auto_step >= len(AUTO_SEQUENCE):
+                        auto_mode = False
+                        auto_step = 0
+                        stop_all_motors()
+                    else:
+                        auto_step_start = novapi.timer()
+            elif tag == 'enc_rot':
+                _, total_ticks, _vy, omega_power = step
+                if _enc_step_initialized != auto_step:
+                    _enc_rot_start(total_ticks, omega_power)
+                    _enc_step_initialized = auto_step
+                next_step = AUTO_SEQUENCE[auto_step + 1] if auto_step + 1 < len(AUTO_SEQUENCE) else None
+                next_is_enc_rot = next_step is not None and isinstance(next_step[0], str) and (next_step[0] == 'enc_rot')
+                if _enc_rot_tick(abs(omega_power), stop_motors=not next_is_enc_rot):
+                    auto_step += 1
+                    if auto_step >= len(AUTO_SEQUENCE):
+                        auto_mode = False
+                        auto_step = 0
+                        stop_all_motors()
+                    else:
+                        auto_step_start = novapi.timer()
+            elif tag == 'enc_moverot':
+                _, total_ticks, vy_power, vx_power, omega_power, rot_ticks = step
+                if _enc_step_initialized != auto_step:
+                    _enc_moverot_start(total_ticks, vy_power, vx_power, omega_power, rot_ticks)
+                    _enc_step_initialized = auto_step
+                next_step = AUTO_SEQUENCE[auto_step + 1] if auto_step + 1 < len(AUTO_SEQUENCE) else None
+                next_is_moverot = next_step is not None and isinstance(next_step[0], str) and (next_step[0] == 'enc_moverot')
+                if _enc_move_tick(max(abs(vy_power), abs(vx_power), abs(omega_power)), stop_motors=not next_is_moverot):
+                    auto_step += 1
+                    if auto_step >= len(AUTO_SEQUENCE):
+                        auto_mode = False
+                        auto_step = 0
+                        stop_all_motors()
+                    else:
+                        auto_step_start = novapi.timer()
+            elif tag == 'enc_stop':
+                stop_all_motors()
+                auto_step += 1
+                if auto_step >= len(AUTO_SEQUENCE):
+                    auto_mode = False
+                    auto_step = 0
+                    pass
+                else:
+                    auto_step_start = novapi.timer()
+                    pass
+            elif tag == 'spin':
+                _, deg, _w = step
+                rot_speed = 90.0 * abs(_w) / 50.0
+                need_dur = abs(deg) / max(rot_speed, 1.0)
+                w_sign = 1 if deg > 0 else -1
+                w_out = w_sign * abs(_w)
+                if INVERT_OMEGA:
+                    w_out = -w_out
+                M1p, M2p, M3p = omni_kinematics(0, 0, w_out)
+                __motor_M1.set_power(M1p)
+                __motor_M2.set_power(M2p)
+                __motor_M3.set_power(M3p)
+                if elapsed >= need_dur:
+                    stop_all_motors()
+                    auto_step += 1
+                    if auto_step >= len(AUTO_SEQUENCE):
+                        auto_mode = False
+                        auto_step = 0
+                    else:
+                        auto_step_start = novapi.timer()
+            elif tag == 'delay':
+                _, delay_dur = (step[0], step[1])
+                if elapsed >= delay_dur:
+                    auto_step += 1
+                    auto_step_start = novapi.timer()
+                    pass
+            elif tag == 'motor_pos':
+                _, mp_id, mp_target, mp_kp, mp_ki, mp_kd = step
+                motor_pos_start(str(mp_id), float(mp_target), float(mp_kp), float(mp_ki), float(mp_kd))
+                auto_step += 1
+                if auto_step >= len(AUTO_SEQUENCE):
+                    auto_mode = False
+                    auto_step = 0
+                else:
+                    auto_step_start = novapi.timer()
+            elif tag == 'motor':
+                _, motor_id, power = step
+                motor_map = {'M1': __motor_M1, 'M2': __motor_M2, 'M3': __motor_M3}
+                m = motor_map.get(str(motor_id))
+                if m is not None:
+                    m.set_power(int(power))
+                    pass
+                auto_step += 1
+                if auto_step >= len(AUTO_SEQUENCE):
+                    auto_mode = False
+                    auto_step = 0
+                else:
+                    auto_step_start = novapi.timer()
+            elif tag == 'dc_motor':
+                _, dc_port, power = step
+                power_expand_board.set_power(str(dc_port), int(power))
+                pass
+                auto_step += 1
+                if auto_step >= len(AUTO_SEQUENCE):
+                    auto_mode = False
+                    auto_step = 0
+                else:
+                    auto_step_start = novapi.timer()
+            elif tag == 'servo':
+                pass
+                auto_step += 1
+                auto_step_start = novapi.timer()
+            else:
+                pass
+                auto_step += 1
+                auto_step_start = novapi.timer()
+            if auto_step >= len(AUTO_SEQUENCE):
+                stop_all_motors()
+                auto_mode = False
+                auto_step = 0
+                auto_prev_Vx = 0.0
+                auto_prev_Vy = 0.0
+                auto_prev_omega = 0.0
+                pass
+            if not (_debug_cal_done and novapi.timer() < _cal_display_until):
+                __led.show('S%d' % BL_ACTION_SPEED)
+            time.sleep(AUTO_STEP_DELAY)
+            continue
+        step_duration, step_Vx, step_Vy, step_omega = step
+        if INVERT_VX:
+            step_Vx = -step_Vx
+        if INVERT_VY:
+            step_Vy = -step_Vy
+        if INVERT_OMEGA:
+            step_omega = -step_omega
+        if elapsed >= step_duration:
+            Vx_end, Vy_end = rotate_velocity(step_Vx, step_Vy, face)
+            auto_prev_Vx = Vx_end
+            auto_prev_Vy = Vy_end
+            auto_prev_omega = step_omega
+            auto_step += 1
+            if auto_step >= len(AUTO_SEQUENCE):
+                stop_all_motors()
+                auto_mode = False
+                auto_step = 0
+                auto_prev_Vx = 0.0
+                auto_prev_Vy = 0.0
+                auto_prev_omega = 0.0
+                pass
+            else:
+                auto_step_start = novapi.timer()
+                next_step = AUTO_SEQUENCE[auto_step]
+                if isinstance(next_step[0], str):
+                    pass
+                else:
+                    next_dur, next_Vx, next_Vy, next_omega = next_step
+                    pass
+        else:
+            Vx_target, Vy_target = rotate_velocity(step_Vx, step_Vy, face)
+            omega_target = step_omega
+            if AUTO_RAMP_MS > 0 and elapsed * 1000.0 < AUTO_RAMP_MS:
+                alpha = elapsed * 1000.0 / AUTO_RAMP_MS
+                Vx_out = auto_prev_Vx + (Vx_target - auto_prev_Vx) * alpha
+                Vy_out = auto_prev_Vy + (Vy_target - auto_prev_Vy) * alpha
+                omega_out = auto_prev_omega + (omega_target - auto_prev_omega) * alpha
+            else:
+                Vx_out = Vx_target
+                Vy_out = Vy_target
+                omega_out = omega_target
+            step_ms = step_duration * 1000.0
+            elapsed_ms = elapsed * 1000.0
+            if AUTO_ACCEL_MS > 0 and step_ms > AUTO_ACCEL_MS * 2:
+                if elapsed_ms < AUTO_ACCEL_MS:
+                    accel = elapsed_ms / AUTO_ACCEL_MS
+                elif elapsed_ms > step_ms - AUTO_ACCEL_MS:
+                    accel = (step_ms - elapsed_ms) / AUTO_ACCEL_MS
+                else:
+                    accel = 1.0
+            else:
+                accel = 1.0
+            Vx_out *= accel
+            Vy_out *= accel
+            omega_out *= accel
+            M1_power, M2_power, M3_power = omni_kinematics(Vx_out, Vy_out, omega_out)
+            __motor_M1.set_power(M1_power)
+            __motor_M2.set_power(M2_power)
+            __motor_M3.set_power(M3_power)
+        if not (_debug_cal_done and novapi.timer() < _cal_display_until):
+            __led.show('S%d' % BL_ACTION_SPEED)
+        time.sleep(AUTO_STEP_DELAY)
+        continue
+    if debug_mode:
+        cur_Up = gamepad.is_key_pressed('Up')
+        cur_Down = gamepad.is_key_pressed('Down')
+        cur_Left = gamepad.is_key_pressed('Left')
+        cur_Right = gamepad.is_key_pressed('Right')
+        cur_N1 = gamepad.is_key_pressed('N1')
+        cur_N2 = gamepad.is_key_pressed('N2')
+        cur_N3 = gamepad.is_key_pressed('N3')
+        cur_L1 = gamepad.is_key_pressed('L1')
+        cur_R1 = gamepad.is_key_pressed('R1')
+        cur_N4 = gamepad.is_key_pressed('N4')
+        cur_Menu = gamepad.is_key_pressed('≡')
+        cur_Plus = gamepad.is_key_pressed('+')
+        if cur_Left and cur_Right:
+            _dpad_lr_conflict += 1
+        else:
+            _dpad_lr_conflict = 0
+        if _dpad_lr_conflict >= 3:
+            cur_Left = False
+            cur_Right = False
+        if cur_Up and cur_Down:
+            _dpad_ud_conflict += 1
+        else:
+            _dpad_ud_conflict = 0
+        if _dpad_ud_conflict >= 3:
+            cur_Up = False
+            cur_Down = False
+        if cur_Menu and (not last_Menu):
+            debug_stop_motor()
+            debug_mode = False
+            debug_cal_mode = False
+            debug_cal_running = False
+            debug_cal_done_time = 0.0
+            stop_all_motors()
+            pass
+            last_Up = last_Down = last_Left = last_Right = False
+            last_N1 = last_N2 = last_N3 = last_N4 = False
+            last_L1_debug = last_R1_debug = False
+            last_Menu = cur_Menu
+            time.sleep(0.3)
+            continue
+        if cur_Plus and (not last_Plus):
+            debug_stop_motor()
+            debug_mode = False
+            debug_cal_mode = False
+            debug_cal_running = False
+            debug_cal_done_time = 0.0
+            stop_all_motors()
+            _reset_drive_encoder_reference('debug_auto')
+            _debug_cal_done = False
+            _enc_cal_auto_started = False
+            _enc_step_initialized = -1
+            _cal_delta_M1 = _cal_delta_M2 = _cal_delta_M3 = _cal_delta_M4 = None
+            auto_mode = True
+            auto_step = 0
+            auto_step_start = novapi.timer()
+            auto_prev_Vx = 0.0
+            auto_prev_Vy = 0.0
+            auto_prev_omega = 0.0
+            step0 = AUTO_SEQUENCE[0]
+            if isinstance(step0[0], str):
+                pass
+            else:
+                dur0, Vx0, Vy0, w0 = step0
+                pass
+            last_Up = last_Down = last_Left = last_Right = False
+            last_N1 = last_N2 = last_N3 = last_N4 = False
+            last_L1_debug = last_R1_debug = False
+            last_Menu = cur_Menu
+            last_Plus = cur_Plus
+            time.sleep(0.3)
+            continue
+        if debug_cal_mode:
+            if debug_cal_running:
+                still_running = debug_cal_tick()
+                if not still_running:
+                    pass
+                last_Up = cur_Up
+                last_Down = cur_Down
+                last_Left = cur_Left
+                last_Right = cur_Right
+                last_N1 = cur_N1
+                last_N2 = cur_N2
+                last_N3 = cur_N3
+                last_N4 = cur_N4
+                last_L1_debug = cur_L1
+                last_R1_debug = cur_R1
+                last_Menu = cur_Menu
+                time.sleep(LOOP_DELAY)
+                continue
+            cal_key_handled = False
+            if _debug_cal_done:
+                if cur_N1 and (not last_N1):
+                    _show_cal_delta(1, _cal_delta_M1)
+                    cal_key_handled = True
+                if cur_N2 and (not last_N2):
+                    _show_cal_delta(2, _cal_delta_M2)
+                    cal_key_handled = True
+                if cur_N3 and (not last_N3):
+                    _show_cal_delta(3, _cal_delta_M3)
+                    cal_key_handled = True
+                if cur_N4 and (not last_N4):
+                    _show_cal_delta(4, _cal_delta_M4)
+                    cal_key_handled = True
+            if cal_key_handled:
+                last_Up = cur_Up
+                last_Down = cur_Down
+                last_Left = cur_Left
+                last_Right = cur_Right
+                last_N1 = cur_N1
+                last_N2 = cur_N2
+                last_N3 = cur_N3
+                last_N4 = cur_N4
+                last_L1_debug = cur_L1
+                last_R1_debug = cur_R1
+                last_Menu = cur_Menu
+                time.sleep(LOOP_DELAY)
+                continue
+            if debug_cal_done_time > 0:
+                if novapi.timer() - debug_cal_done_time < 2.0:
+                    last_Up = cur_Up
+                    last_Down = cur_Down
+                    last_Left = cur_Left
+                    last_Right = cur_Right
+                    last_N1 = cur_N1
+                    last_N2 = cur_N2
+                    last_N3 = cur_N3
+                    last_N4 = cur_N4
+                    last_L1_debug = cur_L1
+                    last_R1_debug = cur_R1
+                    last_Menu = cur_Menu
+                    time.sleep(LOOP_DELAY)
+                    continue
+                else:
+                    debug_cal_done_time = 0.0
+            if debug_cal_auto_start and novapi.timer() - debug_cal_auto_time >= 1.0:
+                debug_cal_auto_start = False
+                debug_cal_start(CAL_ANGLE)
+                last_Up = cur_Up
+                last_Down = cur_Down
+                last_Left = cur_Left
+                last_Right = cur_Right
+                last_N1 = cur_N1
+                last_N2 = cur_N2
+                last_N3 = cur_N3
+                last_N4 = cur_N4
+                last_L1_debug = cur_L1
+                last_R1_debug = cur_R1
+                last_Menu = cur_Menu
+                time.sleep(LOOP_DELAY)
+                continue
+            if cur_N1 and (not last_N1):
+                debug_cal_auto_start = False
+                debug_cal_start(CAL_ANGLE)
+            if cur_L1 and cur_R1 and (not last_L1_debug or not last_R1_debug):
+                debug_cal_mode = False
+                debug_cal_running = False
+                debug_cal_done_time = 0.0
+                debug_cal_auto_start = False
+                stop_all_motors()
+                pass
+                last_Up = last_Down = last_Left = last_Right = False
+                last_N1 = last_N2 = last_N3 = last_N4 = False
+                last_L1_debug = last_R1_debug = False
+                last_Menu = cur_Menu
+                time.sleep(0.3)
+                continue
+            last_Up = cur_Up
+            last_Down = cur_Down
+            last_Left = cur_Left
+            last_Right = cur_Right
+            last_N1 = cur_N1
+            last_N2 = cur_N2
+            last_N3 = cur_N3
+            last_N4 = cur_N4
+            last_L1_debug = cur_L1
+            last_R1_debug = cur_R1
+            last_Menu = cur_Menu
+            time.sleep(LOOP_DELAY)
+            continue
+        if cur_L1 and cur_R1 and (not last_L1_debug or not last_R1_debug):
+            debug_cal_mode = True
+            debug_cal_running = False
+            debug_cal_done_time = 0.0
+            debug_cal_auto_start = True
+            debug_cal_auto_time = novapi.timer()
+            __led.show('E%d' % CAL_ANGLE)
+            pass
+            pass
+            pass
+            pass
+            pass
+            pass
+            last_Up = last_Down = last_Left = last_Right = False
+            last_N1 = last_N2 = last_N3 = last_N4 = False
+            last_L1_debug = cur_L1
+            last_R1_debug = cur_R1
+            time.sleep(0.3)
+            continue
+        cal_key_handled = False
+        if _debug_cal_done:
+            if cur_N1 and (not last_N1):
+                _show_cal_delta(1, _cal_delta_M1)
+                cal_key_handled = True
+            if cur_N2 and (not last_N2):
+                _show_cal_delta(2, _cal_delta_M2)
+                cal_key_handled = True
+            if cur_N3 and (not last_N3):
+                _show_cal_delta(3, _cal_delta_M3)
+                cal_key_handled = True
+            if cur_N4 and (not last_N4):
+                _show_cal_delta(4, _cal_delta_M4)
+                cal_key_handled = True
+        if cal_key_handled:
+            last_Up = cur_Up
+            last_Down = cur_Down
+            last_Left = cur_Left
+            last_Right = cur_Right
+            last_N1 = cur_N1
+            last_N2 = cur_N2
+            last_N3 = cur_N3
+            last_N4 = cur_N4
+            last_L1_debug = cur_L1
+            last_R1_debug = cur_R1
+            last_Menu = cur_Menu
+            time.sleep(LOOP_DELAY)
+            continue
+        if cur_Up and (not last_Up):
+            debug_motor_type = (debug_motor_type + 1) % len(DEBUG_MOTOR_TYPES)
+            max_idx = len(DEBUG_ALL_NAMES[debug_motor_type]) - 1
+            if debug_motor_index > max_idx:
+                debug_motor_index = 0
+            if debug_motor_type == 2:
+                __led.show(DEBUG_LIFT_NAMES[debug_lift_gear_index])
+            else:
+                name = DEBUG_ALL_NAMES[debug_motor_type][debug_motor_index]
+                __led.show(name)
+            pass
+        if cur_Down and (not last_Down):
+            debug_motor_type = (debug_motor_type - 1) % len(DEBUG_MOTOR_TYPES)
+            max_idx = len(DEBUG_ALL_NAMES[debug_motor_type]) - 1
+            if debug_motor_index > max_idx:
+                debug_motor_index = 0
+            if debug_motor_type == 2:
+                __led.show(DEBUG_LIFT_NAMES[debug_lift_gear_index])
+            else:
+                name = DEBUG_ALL_NAMES[debug_motor_type][debug_motor_index]
+                __led.show(name)
+            pass
+        if debug_motor_type == 2:
+            if cur_Left and (not last_Left):
+                debug_lift_gear_index = (debug_lift_gear_index - 1) % len(DEBUG_LIFT_GEARS)
+                __led.show('A%d' % DEBUG_LIFT_GEARS[debug_lift_gear_index])
+                debug_show_speed_until = novapi.timer() + 1.0
+                pass
+            if cur_Right and (not last_Right):
+                debug_lift_gear_index = (debug_lift_gear_index + 1) % len(DEBUG_LIFT_GEARS)
+                __led.show('A%d' % DEBUG_LIFT_GEARS[debug_lift_gear_index])
+                debug_show_speed_until = novapi.timer() + 1.0
+                pass
+        else:
+            max_idx = len(DEBUG_ALL_NAMES[debug_motor_type]) - 1
+            if cur_Left and (not last_Left):
+                debug_motor_index = (debug_motor_index - 1) % (max_idx + 1)
+                name = DEBUG_ALL_NAMES[debug_motor_type][debug_motor_index]
+                __led.show(name)
+                pass
+            if cur_Right and (not last_Right):
+                debug_motor_index = (debug_motor_index + 1) % (max_idx + 1)
+                name = DEBUG_ALL_NAMES[debug_motor_type][debug_motor_index]
+                __led.show(name)
+                pass
+        if not cur_N1 and (not cur_N4):
+            if debug_show_ok:
+                if novapi.timer() >= debug_show_speed_until:
+                    debug_show_ok = False
+            elif debug_show_speed_until > 0 and novapi.timer() < debug_show_speed_until:
+                if debug_motor_type == 3:
+                    __led.show('A%d' % DEBUG_SERVO_ANGLE)
+                elif debug_motor_type == 2:
+                    __led.show('A%d' % DEBUG_LIFT_GEARS[debug_lift_gear_index])
+                elif debug_motor_type == 4:
+                    __led.show('S%d' % DEBUG_TEST_SPEED)
+                else:
+                    __led.show('S%d' % DEBUG_TEST_SPEED)
+            elif _debug_cal_done and novapi.timer() < _cal_display_until:
+                pass
+            elif debug_motor_type == 2:
+                __led.show(DEBUG_LIFT_NAMES[debug_lift_gear_index])
+            else:
+                __led.show(DEBUG_ALL_NAMES[debug_motor_type][debug_motor_index])
+        if _debug_cal_done:
+            if cur_N1 and (not last_N1):
+                __led.show('E%d' % int(_cal_delta_M1))
+                pass
+            if cur_N2 and (not last_N2):
+                __led.show('E%d' % int(_cal_delta_M2))
+                pass
+            if cur_N3 and (not last_N3):
+                __led.show('E%d' % int(_cal_delta_M3))
+                pass
+        if debug_motor_type == 0:
+            if cur_N1:
+                speed = DEBUG_TEST_SPEED
+            elif cur_N4:
+                speed = -DEBUG_TEST_SPEED
+            else:
+                speed = 0
+            motor = [__motor_M1, __motor_M2, __motor_M3, __motor_M4, __motor_M5][debug_motor_index]
+            motor.set_power(speed)
+        elif debug_motor_type == 1:
+            if cur_N1:
+                speed = DEBUG_TEST_SPEED
+            elif cur_N4:
+                speed = -DEBUG_TEST_SPEED
+            else:
+                speed = 0
+            power_expand_board.set_power(DC_COLLECTOR_PORT, speed)
+        elif debug_motor_type == 2:
+            pass
+        elif debug_motor_type == 3:
+            if _HAS_SERVO:
+                try:
+                    _sv = [__servo_1, __servo_2][debug_motor_index]
+                except Exception:
+                    _sv = None
+                if cur_N1 and (not last_N1) and _sv:
+                    _sv.move_to(servo_dir * DEBUG_SERVO_ANGLE, SERVO_MOVE_SPEED)
+                    __led.show('A%d' % DEBUG_SERVO_ANGLE)
+                    pass
+                if cur_N4 and (not last_N4) and _sv:
+                    _sv.move_to(0, SERVO_MOVE_SPEED)
+                    __led.show('SV0')
+                    pass
+        elif debug_motor_type == 4:
+            if cur_N1:
+                speed = DEBUG_TEST_SPEED
+            elif cur_N4:
+                speed = 0
+            else:
+                speed = 0
+            if debug_motor_index == 2:
+                try:
+                    power_expand_board.set_power('BL1', speed)
+                    power_expand_board.set_power('BL2', speed)
+                    power_expand_board.set_power(DC_COLLECTOR_PORT, -100 if speed != 0 else 0)
+                except Exception:
+                    pass
+            else:
+                port = ['BL1', 'BL2'][debug_motor_index]
+                try:
+                    power_expand_board.set_power(port, speed)
+                except Exception:
+                    pass
+        if cur_N2 and (not last_N2):
+            if debug_motor_type == 3:
+                DEBUG_SERVO_ANGLE = min(SERVO_MAX_ANGLE, DEBUG_SERVO_ANGLE + 5)
+                debug_show_speed_until = novapi.timer() + 2.0
+                pass
+            elif debug_motor_type == 2:
+                DEBUG_LIFT_GEARS[debug_lift_gear_index] = min(3600, DEBUG_LIFT_GEARS[debug_lift_gear_index] + 10)
+                debug_show_speed_until = novapi.timer() + 2.0
+                pass
+            else:
+                DEBUG_TEST_SPEED = min(100, DEBUG_TEST_SPEED + 10)
+                debug_show_speed_until = novapi.timer() + 2.0
+                pass
+        if cur_N3 and (not last_N3):
+            if debug_motor_type == 3:
+                DEBUG_SERVO_ANGLE = max(0, DEBUG_SERVO_ANGLE - 5)
+                debug_show_speed_until = novapi.timer() + 2.0
+                pass
+            elif debug_motor_type == 2:
+                DEBUG_LIFT_GEARS[debug_lift_gear_index] = max(-3600, DEBUG_LIFT_GEARS[debug_lift_gear_index] - 10)
+                debug_show_speed_until = novapi.timer() + 2.0
+                pass
+            else:
+                DEBUG_TEST_SPEED = max(10, DEBUG_TEST_SPEED - 10)
+                debug_show_speed_until = novapi.timer() + 2.0
+                pass
+        if debug_motor_type == 3 and cur_R1 and (not last_R1_debug) and _HAS_SERVO:
+            try:
+                _sv = [__servo_1, __servo_2][debug_motor_index]
+                _sv.set_zero()
+                __led.show('OK')
+                debug_show_speed_until = novapi.timer() + 1.0
+                debug_show_ok = True
+                pass
+            except Exception:
+                pass
+        if debug_motor_type == 2 and cur_L1 and (not last_L1_debug):
+            debug_motor_type = 0
+            debug_motor_index = 0
+            __led.show(DEBUG_ALL_NAMES[0][0])
+            pass
+        last_Up = cur_Up
+        last_Down = cur_Down
+        last_Left = cur_Left
+        last_Right = cur_Right
+        last_N1 = cur_N1
+        last_N2 = cur_N2
+        last_N3 = cur_N3
+        last_N4 = cur_N4
+        last_L1_debug = cur_L1
+        last_R1_debug = cur_R1
+        last_Menu = cur_Menu
+        if _lift_pid_active[0] or _lift_pid_active[1]:
+            lift_pid_tick_all()
+        if _lift_homing[0] or _lift_homing[1]:
+            _lift_homing_tick_all()
+        time.sleep(LOOP_DELAY)
+        continue
+    cur_L1 = gamepad.is_key_pressed('L1')
+    if face_rotating:
+        if cur_L1 and (not last_L1):
+            face = (face + 1) % 3
+            face_rot_target_deg += FACE_ROTATE_WHEEL_DEG
+            face_rot_start_time = novapi.timer()
+            face_rot_settled = False
+            pass
+        if face_rotate_tick():
+            face_show_until = novapi.timer() + FACE_SHOW_MS / 1000.0
+            pass
+        last_L1 = cur_L1
+        __led.show('S%d' % BL_ACTION_SPEED)
+        time.sleep(LOOP_DELAY)
+        continue
+    Lx = gamepad.get_joystick('Lx')
+    Ly = gamepad.get_joystick('Ly')
+    Rx = gamepad.get_joystick('Rx')
+    cur_R1 = gamepad.is_key_pressed('R1')
+    cur_R2 = gamepad.is_key_pressed('R2')
+    cur_L2 = gamepad.is_key_pressed('L2')
+    cur_Plus = gamepad.is_key_pressed('+')
+    cur_Menu = gamepad.is_key_pressed('≡')
+    cur_N1 = gamepad.is_key_pressed('N1')
+    cur_N2 = gamepad.is_key_pressed('N2')
+    cur_N3 = gamepad.is_key_pressed('N3')
+    cur_N4 = gamepad.is_key_pressed('N4')
+    cur_Dpad_Up = gamepad.is_key_pressed('Up')
+    cur_Dpad_Down = gamepad.is_key_pressed('Down')
+    cur_Dpad_Left = gamepad.is_key_pressed('Left')
+    cur_Dpad_Right = gamepad.is_key_pressed('Right')
+    cal_key_handled = False
+    if _debug_cal_done:
+        if cur_N1 and (not last_N1):
+            _show_cal_delta(1, _cal_delta_M1)
+            cal_key_handled = True
+        if cur_N2 and (not last_N2):
+            _show_cal_delta(2, _cal_delta_M2)
+            cal_key_handled = True
+        if cur_N3 and (not last_N3):
+            _show_cal_delta(3, _cal_delta_M3)
+            cal_key_handled = True
+        if cur_N4 and (not last_N4):
+            _show_cal_delta(4, _cal_delta_M4)
+            cal_key_handled = True
+    if cal_key_handled:
+        last_R1 = cur_R1
+        last_R2 = cur_R2
+        last_L2 = cur_L2
+        last_L1 = cur_L1
+        last_Plus = cur_Plus
+        last_Menu = cur_Menu
+        last_N1 = cur_N1
+        last_N2 = cur_N2
+        last_N3 = cur_N3
+        last_N4 = cur_N4
+        last_Dpad_Up_norm = cur_Dpad_Up
+        last_Dpad_Down_norm = cur_Dpad_Down
+        last_Dpad_Left_norm = cur_Dpad_Left
+        last_Dpad_Right_norm = cur_Dpad_Right
+        if _lift_pid_active[0] or _lift_pid_active[1]:
+            lift_pid_tick_all()
+        if _lift_homing[0] or _lift_homing[1]:
+            _lift_homing_tick_all()
+        time.sleep(LOOP_DELAY)
+        continue
+    if cur_Menu and (not last_Menu):
+        if debug_mode:
+            debug_stop_motor()
+            debug_mode = False
+            debug_cal_mode = False
+            debug_cal_running = False
+            debug_cal_done_time = 0.0
+            stop_all_motors()
+            pass
+            last_Up = last_Down = last_Left = last_Right = False
+            last_N1 = last_N2 = last_N3 = last_N4 = False
+            last_L1_debug = last_R1_debug = False
+            last_Menu = cur_Menu
+            time.sleep(0.3)
+        else:
+            debug_mode = True
+            debug_motor_type = 0
+            debug_motor_index = 0
+            debug_cal_mode = False
+            debug_cal_running = False
+            debug_cal_done_time = 0.0
+            __led.show('Test')
+            last_Up = last_Down = last_Left = last_Right = False
+            last_N1 = last_N2 = last_N3 = last_N4 = False
+            last_L1_debug = last_R1_debug = False
+            last_Menu = cur_Menu
+            pass
+            pass
+            pass
+            pass
+            pass
+            pass
+            pass
+            pass
+            pass
+            __led.show('M1')
+        continue
+    cur_motor_idx = FACE_LIFT_MOTOR[face]
+    cur_servo_idx = FACE_GRIP_SERVO[face]
+    if cur_L1 and (not last_L1):
+        if bl1_on or bl2_on:
+            power_expand_board.stop('BL1')
+            power_expand_board.stop('BL2')
+            bl1_on = False
+            bl2_on = False
+            pass
+        face = (face + 1) % 3
+        pass
+        face_rotate_start()
+        last_L1 = cur_L1
+        last_R1 = cur_R1
+        time.sleep(LOOP_DELAY)
+        continue
+    if cur_Plus and (not last_Plus):
+        stop_all_motors()
+        _reset_drive_encoder_reference('normal_auto')
+        auto_mode = True
+        auto_step = 0
+        auto_step_start = novapi.timer()
+        auto_prev_Vx = 0.0
+        auto_prev_Vy = 0.0
+        auto_prev_omega = 0.0
+        _debug_cal_done = False
+        _enc_cal_auto_started = False
+        _enc_step_initialized = -1
+        _cal_delta_M1 = _cal_delta_M2 = _cal_delta_M3 = _cal_delta_M4 = None
+        step0 = AUTO_SEQUENCE[0]
+        if isinstance(step0[0], str):
+            pass
+        else:
+            dur0, Vx0, Vy0, w0 = step0
+            pass
+    if _debug_cal_done:
+        if cur_N1 and (not last_N1):
+            pass
+        if cur_N2 and (not last_N2):
+            pass
+        if cur_N3 and (not last_N3):
+            pass
+    if cur_N2 and (not last_N2) and (not _debug_cal_done):
+        if face == 0:
+            collector_on = not collector_on
+            if collector_on:
+                power_expand_board.set_power(DC_COLLECTOR_PORT, DC_COLLECTOR_SPEED)
+                pass
+            else:
+                power_expand_board.set_power(DC_COLLECTOR_PORT, 0)
+                pass
+        elif cur_motor_idx is not None:
+            lift_gear[cur_motor_idx] = (lift_gear[cur_motor_idx] + 1) % len(DEBUG_LIFT_GEARS)
+            lift_fine_offset[cur_motor_idx] = 0
+            target_deg = DEBUG_LIFT_GEARS[lift_gear[cur_motor_idx]]
+            lift_pid_start(cur_motor_idx, target_deg)
+            arm = 'M5' if cur_motor_idx == 1 else 'M4'
+            pass
+    if cur_R2 and (not last_R2) and (not _debug_cal_done):
+        if face == 0:
+            bl1_on = not bl1_on
+            bl2_on = not bl2_on
+            if bl1_on:
+                power_expand_board.set_power('BL1', BL_ACTION_SPEED)
+                power_expand_board.set_power('BL2', BL_ACTION_SPEED)
+                pass
+            else:
+                power_expand_board.stop('BL1')
+                power_expand_board.stop('BL2')
+                pass
+        elif cur_servo_idx is not None:
+            _grip_active[cur_servo_idx] = not _grip_active[cur_servo_idx]
+            sv = [__servo_1, __servo_2][cur_servo_idx]
+            sv_name = 'SV1' if cur_servo_idx == 0 else 'SV2'
+            if _grip_active[cur_servo_idx]:
+                _grip_closing[cur_servo_idx] = True
+                _grip_hold[cur_servo_idx] = False
+                _grip_start_time[cur_servo_idx] = novapi.timer()
+                _grip_settled[cur_servo_idx] = False
+                _grip_last_print[cur_servo_idx] = 0.0
+                if _HAS_SERVO:
+                    try:
+                        sv.set_power(GRIP_CLOSE_POWER)
+                    except Exception:
+                        pass
+                pass
+            else:
+                _grip_closing[cur_servo_idx] = False
+                _grip_hold[cur_servo_idx] = False
+                if _HAS_SERVO:
+                    try:
+                        sv.set_power(0)
+                        sv.move_to(0, 30)
+                    except Exception:
+                        pass
+                pass
+    if cur_Dpad_Up and (not last_Dpad_Up_norm) and (not _debug_cal_done):
+        if face == 0:
+            BL_ACTION_SPEED = min(100, BL_ACTION_SPEED + 5)
+            if bl1_on:
+                power_expand_board.set_power('BL1', BL_ACTION_SPEED)
+                power_expand_board.set_power('BL2', BL_ACTION_SPEED)
+            pass
+        elif cur_motor_idx is not None:
+            lift_gear[cur_motor_idx] = (lift_gear[cur_motor_idx] + 1) % len(DEBUG_LIFT_GEARS)
+            lift_fine_offset[cur_motor_idx] = 0
+            target_deg = DEBUG_LIFT_GEARS[lift_gear[cur_motor_idx]]
+            lift_pid_start(cur_motor_idx, target_deg)
+            arm = 'M5' if cur_motor_idx == 1 else 'M4'
+            pass
+    if cur_Dpad_Down and (not last_Dpad_Down_norm) and (not _debug_cal_done):
+        if face == 0:
+            BL_ACTION_SPEED = max(10, BL_ACTION_SPEED - 5)
+            if bl1_on:
+                power_expand_board.set_power('BL1', BL_ACTION_SPEED)
+                power_expand_board.set_power('BL2', BL_ACTION_SPEED)
+            pass
+        elif cur_motor_idx is not None:
+            lift_gear[cur_motor_idx] = (lift_gear[cur_motor_idx] - 1) % len(DEBUG_LIFT_GEARS)
+            lift_fine_offset[cur_motor_idx] = 0
+            target_deg = DEBUG_LIFT_GEARS[lift_gear[cur_motor_idx]]
+            lift_pid_start(cur_motor_idx, target_deg)
+            arm = 'M5' if cur_motor_idx == 1 else 'M4'
+            pass
+    if cur_Dpad_Left and (not last_Dpad_Left_norm) and (not _debug_cal_done):
+        if cur_motor_idx is not None:
+            lift_fine_offset[cur_motor_idx] -= LIFT_FINE_STEP
+            target_deg = DEBUG_LIFT_GEARS[lift_gear[cur_motor_idx]] + lift_fine_offset[cur_motor_idx]
+            target_deg = max(0, target_deg)
+            lift_pid_start(cur_motor_idx, target_deg)
+            arm = 'M5' if cur_motor_idx == 1 else 'M4'
+            pass
+    if cur_Dpad_Right and (not last_Dpad_Right_norm) and (not _debug_cal_done):
+        if cur_motor_idx is not None:
+            lift_fine_offset[cur_motor_idx] += LIFT_FINE_STEP
+            target_deg = DEBUG_LIFT_GEARS[lift_gear[cur_motor_idx]] + lift_fine_offset[cur_motor_idx]
+            lift_pid_start(cur_motor_idx, target_deg)
+            arm = 'M5' if cur_motor_idx == 1 else 'M4'
+            pass
+    if cur_N3 and (not last_N3) and (not _debug_cal_done):
+        if cur_motor_idx is not None:
+            lift_gear[cur_motor_idx] = 0
+            lift_fine_offset[cur_motor_idx] = 0
+            _lift_start_homing(cur_motor_idx)
+            arm = 'M5' if cur_motor_idx == 1 else 'M4'
+            pass
+    last_R1 = cur_R1
+    last_R2 = cur_R2
+    last_L2 = cur_L2
+    last_L1 = cur_L1
+    last_Plus = cur_Plus
+    last_Menu = cur_Menu
+    last_N1 = cur_N1
+    last_N2 = cur_N2
+    last_N3 = cur_N3
+    last_N4 = cur_N4
+    last_Dpad_Up_norm = cur_Dpad_Up
+    last_Dpad_Down_norm = cur_Dpad_Down
+    last_Dpad_Left_norm = cur_Dpad_Left
+    last_Dpad_Right_norm = cur_Dpad_Right
+    if _lift_pid_active[0] or _lift_pid_active[1]:
+        lift_pid_tick_all()
+    if _lift_homing[0] or _lift_homing[1]:
+        _lift_homing_tick_all()
+    if _grip_closing[0] or _grip_closing[1]:
+        for sv_idx in range(2):
+            if not _grip_closing[sv_idx] or not _HAS_SERVO:
+                continue
+            try:
+                sv = [__servo_1, __servo_2][sv_idx]
+                angle = sv.get_value('angle')
+                speed = sv.get_value('speed')
+                now = novapi.timer()
+                elapsed = now - _grip_start_time[sv_idx]
+                sv_name = 'SV1' if sv_idx == 0 else 'SV2'
+                if abs(angle) >= SERVO_MAX_ANGLE:
+                    sv.set_power(0)
+                    _grip_closing[sv_idx] = False
+                    pass
+                elif not _grip_settled[sv_idx]:
+                    if elapsed >= GRIP_SETTLE_TIME:
+                        _grip_settled[sv_idx] = True
+                        pass
+                else:
+                    if now - _grip_last_print[sv_idx] >= 0.5:
+                        _grip_last_print[sv_idx] = now
+                        pass
+                    if abs(speed) < GRIP_SPEED_THRESHOLD:
+                        sv.set_power(0)
+                        _grip_closing[sv_idx] = False
+                        _grip_hold[sv_idx] = True
+                        pass
+                    elif elapsed > GRIP_TIMEOUT:
+                        sv.set_power(0)
+                        _grip_closing[sv_idx] = False
+                        pass
+            except Exception:
+                pass
+    Lx = apply_dead_zone(Lx)
+    Ly = apply_dead_zone(Ly)
+    Rx = apply_dead_zone(Rx)
+    Lx = apply_response_curve(Lx)
+    Ly = apply_response_curve(Ly)
+    Rx = apply_response_curve(Rx)
+    Vx = Lx * SPEED_SCALE
+    Vy = Ly * SPEED_SCALE
+    omega = Rx * SPEED_SCALE
+    if INVERT_VX:
+        Vx = -Vx
+    if INVERT_VY:
+        Vy = -Vy
+    if INVERT_OMEGA:
+        omega = -omega
+    Vx, Vy = rotate_velocity(Vx, Vy, face)
+    Vy *= VY_BOOST
+    M1_power, M2_power, M3_power = omni_kinematics(Vx, Vy, omega)
+    __motor_M1.set_power(M1_power)
+    __motor_M2.set_power(M2_power)
+    __motor_M3.set_power(M3_power)
+    if not (_debug_cal_done and novapi.timer() < _cal_display_until):
+        __led.show('S%d' % BL_ACTION_SPEED)
+    time.sleep(LOOP_DELAY)

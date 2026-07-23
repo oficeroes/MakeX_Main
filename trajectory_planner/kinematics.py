@@ -54,6 +54,7 @@ from .config import (
     BASE_ROT_DEG_PER_SEC,
     MIN_ENC_STEP_TICKS,
     ENC_MERGE_POWER_RATIO,
+    DEFAULT_TRAJ_SAMPLE_DT,
 )
 
 
@@ -185,23 +186,37 @@ def _speed_at_position(dist_from_start, total_len,
     加速段（0 → accel_cm）：   min_spd → max_spd  线性递增
     匀速段（accel_cm → total_len - decel_cm）：max_spd × curve_factor
     减速段（total_len - decel_cm → total_len）：max_spd → min_spd  线性递减
-    路径太短时自动切换为三角形曲线。
+    accel_cm/decel_cm 可为 0。0 表示关闭对应阶段，直接匀速。
+    路径太短时自动缩小加减速距离，避免除零。
     """
-    if total_len <= accel_cm + decel_cm:
-        # 三角形：全程先升后降
-        mid = total_len / 2.0
-        if dist_from_start < mid:
-            return min_spd + (max_spd - min_spd) * (dist_from_start / mid)
-        else:
-            return max_spd - (max_spd - min_spd) * ((dist_from_start - mid) / mid)
-    else:
-        if dist_from_start < accel_cm:
-            return min_spd + (max_spd - min_spd) * (dist_from_start / accel_cm)
-        elif dist_from_start < total_len - decel_cm:
-            return max_spd * curve_factor
-        else:
-            remaining = total_len - dist_from_start
-            return min_spd + (max_spd - min_spd) * (remaining / decel_cm)
+    total_len = max(float(total_len), 0.0)
+    accel_cm = max(float(accel_cm or 0.0), 0.0)
+    decel_cm = max(float(decel_cm or 0.0), 0.0)
+    dist_from_start = max(0.0, min(float(dist_from_start), total_len))
+
+    if total_len <= 1e-9:
+        return max_spd * curve_factor
+
+    # If both ramp phases are disabled, this is the basic constant-speed mode.
+    if accel_cm <= 1e-9 and decel_cm <= 1e-9:
+        return max_spd * curve_factor
+
+    # Safety clamp for direct callers: never let accel+decel exceed the path.
+    ramp_total = accel_cm + decel_cm
+    if ramp_total > total_len and ramp_total > 1e-9:
+        scale = total_len / ramp_total
+        accel_cm *= scale
+        decel_cm *= scale
+
+    if accel_cm > 1e-9 and dist_from_start < accel_cm:
+        return min_spd + (max_spd - min_spd) * (dist_from_start / accel_cm)
+
+    decel_start = total_len - decel_cm
+    if decel_cm > 1e-9 and dist_from_start >= decel_start:
+        remaining = max(0.0, total_len - dist_from_start)
+        return min_spd + (max_spd - min_spd) * (remaining / decel_cm)
+
+    return max_spd * curve_factor
 
 
 def build_encoder_sequence(points, base_power, base_speed_cm_s=BASE_SPEED_CM_PER_SEC,
@@ -289,6 +304,303 @@ def build_encoder_sequence(points, base_power, base_speed_cm_s=BASE_SPEED_CM_PER
         cum_dist += seg_len
 
     seq.append(('enc_stop', 0, 0, 0))
+    return seq
+
+
+def build_travel_spin_sequence(points, base_power, omega_power,
+                               total_spin_deg,
+                               steps=None,
+                               base_speed_cm_s=None,
+                               ticks_per_cm=ENCODER_TICKS_PER_CM,
+                               invert_x=False, invert_y=False,
+                               spin_precision_cm=8.0):
+    """方案 C：行进中自旋 — 边走边转的微步闭环序列。
+
+    把整段路径按弧长切成 N 个微步，每步走一点 + 转总角的 1/N。
+    每步输出 ('enc_moverot', ticks, vy_power, vx_power, omega_power, rot_ticks)，
+    由机器人端 _enc_moverot_start 把平移与旋转的各轮目标角度叠加、一次闭环到位。
+
+    total_spin_deg:    从起点到终点全程要旋转的总角度（+顺时针）
+    steps:             微步数（None = 按 spin_precision_cm 自适应）
+    spin_precision_cm: 自旋精度—每个微步的目标弧长（cm），越小越细越准、步数越多
+
+    转角编码与 enc_rot 一致：rot_ticks = deg * ticks_per_cm * 0.5，符号由 omega 携带。
+    平移方向做车身坐标补偿：随着车头累计转过的角度，把场地系的路径切向旋转回车身系。
+    """
+    if len(points) < 2:
+        return []
+    if base_speed_cm_s is None:
+        from .config import PROFILE_MAX_SPEED as base_speed_cm_s
+
+    total = _path_total_length(points)
+    if total < 0.1:
+        return [('enc_stop', 0, 0, 0)]
+
+    # 微步数：按精度自适应，至少 1 步
+    try:
+        spin_precision_cm = float(spin_precision_cm)
+    except (TypeError, ValueError):
+        spin_precision_cm = 8.0
+    if spin_precision_cm < 0.5:
+        spin_precision_cm = 0.5
+    if steps is None:
+        steps = max(1, int(math.ceil(total / spin_precision_cm)))
+    else:
+        steps = max(1, int(steps))
+
+    cum = _arc_length_table(points)
+    power = _clamp_power(base_power)
+    ow = int(round(abs(omega_power)))
+    seg_arc = total / steps
+    deg_per_step = float(total_spin_deg) / steps
+
+    # 转角符号：+顺时针 → omega 为负（与固件 mecanum/omni 旋转约定一致，与 enc_rot 同）
+    rot_ticks_per_step = int(round(abs(deg_per_step) * ticks_per_cm * 0.5))
+    spin_sign = 1 if deg_per_step >= 0 else -1
+
+    seq = []
+    heading_off = 0.0   # 车身累计转过的角度（度）
+    for k in range(steps):
+        s0 = seg_arc * k
+        s1 = seg_arc * (k + 1)
+        x0, y0 = _point_at_s(points, cum, s0)
+        x1, y1 = _point_at_s(points, cum, s1)
+        dx, dy = x1 - x0, y1 - y0
+        seg_len = math.hypot(dx, dy)
+
+        # 车身坐标补偿：把场地系方向旋转 -heading_off（车头已转过的角度）到车身系
+        mid_heading = heading_off + deg_per_step * 0.5
+        ang = math.radians(mid_heading)
+        cos_a = math.cos(ang)
+        sin_a = math.sin(ang)
+        if seg_len > 1e-6:
+            ux, uy = dx / seg_len, dy / seg_len
+        else:
+            ux, uy = 0.0, 0.0
+        # 旋转到车身系（逆旋转 mid_heading）
+        bx = ux * cos_a + uy * sin_a
+        by = -ux * sin_a + uy * cos_a
+
+        vx = power * bx
+        vy = power * by
+        vx, vy, _ = _scale_vector_to_power(vx, vy, power)
+        if invert_x:
+            vx = -vx
+        if invert_y:
+            vy = -vy
+
+        ticks = int(round(seg_len * ticks_per_cm))
+        vy_power = int(round(vy))
+        vx_power = int(round(vx))
+
+        step_omega = spin_sign * ow if rot_ticks_per_step > 0 else 0
+        if ticks > 0 or rot_ticks_per_step > 0:
+            seq.append(('enc_moverot', ticks, vy_power, vx_power,
+                        int(step_omega), rot_ticks_per_step))
+        heading_off += deg_per_step
+
+    seq.append(('enc_stop', 0, 0, 0))
+    return seq
+
+
+# ================================================================
+#  连续速度轨迹（v6 — 曲线不再拆成位置步）
+# ================================================================
+
+def _arc_length_table(points):
+    cum = [0.0]
+    for i in range(len(points) - 1):
+        x0, y0 = points[i]
+        x1, y1 = points[i + 1]
+        cum.append(cum[-1] + math.hypot(x1 - x0, y1 - y0))
+    return cum
+
+
+def _point_at_s(points, cum, s):
+    if not points:
+        return (0.0, 0.0)
+    if s <= 0:
+        return points[0]
+    if s >= cum[-1]:
+        return points[-1]
+
+    # 线性扫描足够快：GUI 轨迹通常只有几十到几百点。
+    for i in range(len(cum) - 1):
+        s0 = cum[i]
+        s1 = cum[i + 1]
+        if s <= s1:
+            span = max(s1 - s0, 1e-9)
+            t = (s - s0) / span
+            x0, y0 = points[i]
+            x1, y1 = points[i + 1]
+            return (x0 + (x1 - x0) * t, y0 + (y1 - y0) * t)
+    return points[-1]
+
+
+def _power_for_speed(speed_cm_s, cm_per_s_at_p50, power_cap):
+    power = 50.0 * speed_cm_s / max(cm_per_s_at_p50, 0.1)
+    power = min(power, float(power_cap), float(POWER_MAX))
+    if 0 < abs(power) < POWER_MIN:
+        power = POWER_MIN
+    return power
+
+
+def _axis_powers_for_path_speed(ux, uy, target_speed_cm_s,
+                                forward_cm_s_at_p50,
+                                strafe_cm_s_at_p50,
+                                power_cap):
+    """Convert desired path velocity to Vx/Vy powers with anisotropic calibration.
+
+    Mecanum sideways speed is usually lower than forward speed.  This keeps the
+    physical velocity vector aligned with the path by using separate P50 speed
+    constants for X and Y, then scales both axes down if the requested power is
+    above the allowed cap.
+    """
+    forward_cm_s_at_p50 = max(float(forward_cm_s_at_p50), 0.1)
+    strafe_cm_s_at_p50 = max(float(strafe_cm_s_at_p50), 0.1)
+    target_speed_cm_s = max(float(target_speed_cm_s), 0.1)
+
+    vx_power = 50.0 * target_speed_cm_s * ux / strafe_cm_s_at_p50
+    vy_power = 50.0 * target_speed_cm_s * uy / forward_cm_s_at_p50
+
+    mag = math.hypot(vx_power, vy_power)
+    cap = max(1.0, min(float(power_cap), float(POWER_MAX)))
+    if mag > cap:
+        scale = cap / mag
+        vx_power *= scale
+        vy_power *= scale
+
+    actual_vx = vx_power * strafe_cm_s_at_p50 / 50.0
+    actual_vy = vy_power * forward_cm_s_at_p50 / 50.0
+    path_speed = max(0.1, actual_vx * ux + actual_vy * uy)
+    return vx_power, vy_power, path_speed
+
+
+def _merge_traj_v_sequence(seq, angle_tol_deg=2.0, max_dur=0.10):
+    """合并方向几乎一致的 traj_v，减少 AUTO_SEQUENCE 长度但不制造停顿。"""
+    if len(seq) < 2:
+        return list(seq)
+
+    merged = [list(seq[0])]
+    for step in seq[1:]:
+        if not (isinstance(step[0], str) and step[0] == 'traj_v'):
+            merged.append(list(step))
+            continue
+
+        prev = merged[-1]
+        if not (isinstance(prev[0], str) and prev[0] == 'traj_v'):
+            merged.append(list(step))
+            continue
+
+        _, pd, pvx, pvy, pw = prev
+        _, cd, cvx, cvy, cw = step
+        pmag = math.hypot(pvx, pvy)
+        cmag = math.hypot(cvx, cvy)
+        can_merge = False
+        if pw == cw and pd + cd <= max_dur and pmag > 1 and cmag > 1:
+            dot = (pvx * cvx + pvy * cvy) / (pmag * cmag)
+            dot = max(-1.0, min(1.0, dot))
+            angle = math.degrees(math.acos(dot))
+            can_merge = angle <= angle_tol_deg
+
+        if can_merge:
+            total = pd + cd
+            prev[1] = round(total, 3)
+            prev[2] = int(round((pvx * pd + cvx * cd) / total))
+            prev[3] = int(round((pvy * pd + cvy * cd) / total))
+        else:
+            merged.append(list(step))
+
+    return [tuple(s) for s in merged]
+
+
+def build_velocity_sequence(points, cm_per_s_at_p50, auto_power,
+                            target_speed_cm_s=BASE_SPEED_CM_PER_SEC,
+                            strafe_cm_s_at_p50=None,
+                            sample_dt=DEFAULT_TRAJ_SAMPLE_DT,
+                            invert_x=False, invert_y=False,
+                            accel_cm=0.0, decel_cm=0.0,
+                            min_speed=30.0, curve_adaptive=False,
+                            add_stop=True):
+    """生成连续速度播放序列。
+
+    输出 ('traj_v', duration_s, Vx_power, Vy_power, omega_power)。
+    它不调用编码电机位置模式，因此曲线不会在每个短线段末尾减速停顿。
+    距离精度暂时依赖 P50 速度标定和功率-速度近似线性关系。
+    """
+    if len(points) < 2:
+        return []
+
+    total = _path_total_length(points)
+    if total < 0.1:
+        return [('traj_stop', 0, 0, 0)]
+
+    power_cap = _clamp_power(auto_power)
+    if strafe_cm_s_at_p50 is None:
+        strafe_cm_s_at_p50 = cm_per_s_at_p50
+    physical_cap = max(cm_per_s_at_p50, strafe_cm_s_at_p50) * power_cap / 50.0
+    max_speed = max(1.0, min(float(target_speed_cm_s), physical_cap))
+    min_speed = min(float(min_speed), max_speed)
+
+    accel_cm = max(0.0, min(float(accel_cm or 0.0), total * 0.35))
+    decel_cm = max(0.0, min(float(decel_cm or 0.0), total * 0.35))
+    sample_dt = max(0.02, float(sample_dt or DEFAULT_TRAJ_SAMPLE_DT))
+
+    cum = _arc_length_table(points)
+    curv = compute_curvature(points) if curve_adaptive else [0.0] * len(points)
+
+    seq = []
+    s = 0.0
+    while s < total - 1e-6:
+        mid_s = min(total, s + max_speed * sample_dt * 0.5)
+        # 找中点附近曲率，简单取最近路径点。
+        mid_idx = 0
+        for i in range(len(cum)):
+            if cum[i] >= mid_s:
+                mid_idx = i
+                break
+        curve_factor = 1.0
+        if curve_adaptive and curv[mid_idx] > CURVATURE_THRESHOLD:
+            curve_factor = CURVE_SLOWDOWN_FACTOR
+
+        speed = _speed_at_position(mid_s, total, accel_cm, decel_cm,
+                                   min_speed, max_speed, curve_factor)
+        speed = max(1.0, min(speed, physical_cap))
+        chunk_len = min(speed * sample_dt, total - s)
+        if chunk_len < 0.2 and seq:
+            # 把极短尾段并入上一段，避免 0.00/0.01 秒采样。
+            last = list(seq[-1])
+            last[1] = round(float(last[1]) + chunk_len / max(speed, 1.0), 3)
+            seq[-1] = tuple(last)
+            break
+
+        p0 = _point_at_s(points, cum, s)
+        p1 = _point_at_s(points, cum, s + chunk_len)
+        dx = p1[0] - p0[0]
+        dy = p1[1] - p0[1]
+        seg_len = math.hypot(dx, dy)
+        if seg_len < 1e-6:
+            s += chunk_len
+            continue
+
+        ux = dx / seg_len
+        uy = dy / seg_len
+        vx, vy, path_speed = _axis_powers_for_path_speed(
+            ux, uy, speed, cm_per_s_at_p50, strafe_cm_s_at_p50, power_cap)
+        vx, vy, _ = _scale_vector_to_power(vx, vy, power_cap)
+        if invert_x:
+            vx = -vx
+        if invert_y:
+            vy = -vy
+
+        duration = max(0.02, chunk_len / max(path_speed, 1.0))
+        seq.append(('traj_v', round(duration, 3),
+                    int(round(vx)), int(round(vy)), 0))
+        s += chunk_len
+
+    seq = _merge_traj_v_sequence(seq)
+    if add_stop:
+        seq.append(('traj_stop', 0, 0, 0))
     return seq
 
 

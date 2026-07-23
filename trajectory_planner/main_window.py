@@ -50,6 +50,7 @@ from .config import (
     DEFAULT_FIELD_WIDTH_CM,
     DEFAULT_FIELD_HEIGHT_CM,
     DEFAULT_CM_PER_SEC_AT_P50,
+    DEFAULT_STRAFE_CM_PER_SEC_AT_P50,
     DEFAULT_DEG_PER_SEC_AT_OMEGA50,
     DEFAULT_AUTO_POWER,
     DEFAULT_OMEGA_POWER,
@@ -71,6 +72,7 @@ from .config import (
     CHASSIS_PROFILES,
     DEFAULT_PROFILE_ID,
     get_profile,
+    normalize_profile_id,
     WHEEL_CIRCUMFERENCE_CM,
     RAMP_ENABLED,
     DEFAULT_RAMP_TIME,
@@ -78,8 +80,9 @@ from .config import (
     DEFAULT_RAMP_MIN_RATIO,
     BASE_SPEED_CM_PER_SEC,
     BASE_ROT_DEG_PER_SEC,
-    ENCODER_TICKS_PER_CM,
     DEFAULT_DISTANCE_SCALE,
+    DEFAULT_TRAJ_SAMPLE_DT,
+    CENTER_SAFETY_MARGIN_CM,
     CURVE_SLOWDOWN_FACTOR,
     STRAIGHT_BOOST_FACTOR,
     PROFILE_ACCEL_CM,
@@ -92,7 +95,13 @@ from .config import (
     PROFILE_CURVE_ADAPTIVE,
 )
 from .field_view import FieldScene, FieldView
-from .kinematics import build_sequence, build_encoder_sequence, build_encoder_sequence_heading
+from .kinematics import (
+    build_sequence,
+    build_encoder_sequence,
+    build_encoder_sequence_heading,
+    build_velocity_sequence,
+    build_travel_spin_sequence,
+)
 from .kinematics import _path_total_length, merge_enc_sequence
 from .file_io import build_payload, save_trajectory, load_trajectory, next_filename
 from .exporter import write_auto_sequence
@@ -101,6 +110,35 @@ from .action_block_item import ActionBlockItem
 
 
 class MainWindow(QtWidgets.QMainWindow):
+    PROFILE_CALIBRATION_KEYS = (
+        "cm_per_second_at_power_50",
+        "strafe_cm_per_second_at_power_50",
+        "deg_per_second_at_omega_50",
+        "auto_power",
+        "omega_power",
+        "encoder_ticks_per_cm",
+        "distance_scale",
+        "encoder_ppr",
+        "front_back_compensation",
+        "rotation_balance",
+        "strafe_vy_coupling",
+    )
+    PROFILE_SETTING_KEYS = (
+        "mode",
+        "invert_x",
+        "invert_y",
+        "ramp_ms",
+        "ramp_enabled",
+        "ramp_time",
+        "ramp_steps",
+        "accel_cm",
+        "decel_cm",
+        "max_speed",
+        "min_speed",
+        "rot_speed",
+        "curve_adaptive",
+    )
+
     def __init__(self):
         super().__init__()
         self.setWindowTitle("轨迹规划器")
@@ -108,16 +146,31 @@ class MainWindow(QtWidgets.QMainWindow):
         self._current_file = None
         self._undo_stack = []   # list of payload dicts (最多 30 步)
         self._redo_stack = []
+        self._profile_params = {}
+        self._active_profile_id = DEFAULT_PROFILE_ID
+        self._loading_profile_params = False
 
         self.scene = FieldScene(DEFAULT_FIELD_WIDTH_CM, DEFAULT_FIELD_HEIGHT_CM)
         self.view = FieldView(self.scene)
         self.scene.smooth_iter = DEFAULT_SMOOTH_ITER
         self.scene.resample_step = DEFAULT_RESAMPLE_CM
 
-        self.setCentralWidget(self.view)
+        central = QtWidgets.QWidget()
+        central_h = QtWidgets.QHBoxLayout(central)
+        central_h.setContentsMargins(0, 0, 0, 0)
+        central_h.setSpacing(0)
+        self._left_panel = self._build_left_toolpanel()
+        central_h.addWidget(self._left_panel)
+        central_h.addWidget(self.view, 1)
+        self.setCentralWidget(central)
 
         self._build_toolbar()
         self._build_dock()
+        self._reset_profile_params()
+        self._active_profile_id = self._current_profile().profile_id
+        self._load_profile_params_to_controls(self._active_profile_id)
+        self.lbl_chassis_desc.setText(self._current_profile().description)
+        self._refresh_hint_label()
         self._build_statusbar()
         self._wire_signals()
         self._refresh_title()
@@ -279,6 +332,49 @@ class MainWindow(QtWidgets.QMainWindow):
             lambda: self.scene.recompute_overlaps(self.sp_overlap_thresh.value()))
         tb2.addWidget(btn_recompute)
 
+
+    # ---- 左侧竖排绘制工具面板 ----
+    def _build_left_toolpanel(self):
+        """左侧常驻竖排工具面板：手绘 / 样条 / 直线，不再折进溢出菜单。"""
+        panel = QtWidgets.QFrame()
+        panel.setFrameShape(QtWidgets.QFrame.StyledPanel)
+        panel.setFixedWidth(84)
+        panel.setStyleSheet("QFrame { background:#f4f4f6; border-right:1px solid #ccc; }")
+        v = QtWidgets.QVBoxLayout(panel)
+        v.setContentsMargins(6, 8, 6, 8)
+        v.setSpacing(6)
+        lbl = QtWidgets.QLabel("绘制工具")
+        lbl.setStyleSheet("font-weight:bold; color:#333; border:none;")
+        lbl.setAlignment(QtCore.Qt.AlignCenter)
+        v.addWidget(lbl)
+        self._draw_tool_btns = {}
+        _tool_defs = [
+            ("freehand", "✏️ 手绘", "自由手绘：按住左键拖动画线"),
+            ("spline", "〰️ 样条", "样条曲线：逐个单击落锚点，曲线穿过每个点；双击/回车完成，Backspace 撤销上一点，Esc 取消"),
+            ("line", "📏 直线", "折线段：逐个单击落锚点，直线连接；双击/回车完成，Backspace 撤销上一点，Esc 取消"),
+        ]
+        _tool_group = QtWidgets.QButtonGroup(self)
+        _tool_group.setExclusive(True)
+        for kind, text, tip in _tool_defs:
+            btn = QtWidgets.QToolButton()
+            btn.setText(text)
+            btn.setCheckable(True)
+            btn.setToolTip(tip)
+            btn.setChecked(kind == "freehand")
+            btn.setSizePolicy(QtWidgets.QSizePolicy.Expanding, QtWidgets.QSizePolicy.Fixed)
+            btn.setStyleSheet(
+                "QToolButton { border:1px solid #888; border-radius:4px;"
+                " padding:6px 4px; margin:1px; }"
+                "QToolButton:checked { background:#2878D0; color:white;"
+                " border-color:#2878D0; }"
+            )
+            btn.clicked.connect(lambda _=False, k=kind: self._on_draw_tool_changed(k))
+            _tool_group.addButton(btn)
+            v.addWidget(btn)
+            self._draw_tool_btns[kind] = btn
+        v.addStretch(1)
+        return panel
+
     # ---- 右侧控件 ----
     def _build_dock(self):
         dock = QtWidgets.QDockWidget("参数面板", self)
@@ -312,7 +408,7 @@ class MainWindow(QtWidgets.QMainWindow):
         f_field = QtWidgets.QFormLayout()
 
         self.sp_field_w = QtWidgets.QDoubleSpinBox()
-        self.sp_field_w.setRange(50, 2000)
+        self.sp_field_w.setRange(50, 50000)
         self.sp_field_w.setDecimals(1)
         self.sp_field_w.setSuffix(" cm")
         self.sp_field_w.setValue(DEFAULT_FIELD_WIDTH_CM)
@@ -320,7 +416,7 @@ class MainWindow(QtWidgets.QMainWindow):
         f_field.addRow("场地宽:", self.sp_field_w)
 
         self.sp_field_h = QtWidgets.QDoubleSpinBox()
-        self.sp_field_h.setRange(50, 2000)
+        self.sp_field_h.setRange(50, 50000)
         self.sp_field_h.setDecimals(1)
         self.sp_field_h.setSuffix(" cm")
         self.sp_field_h.setValue(DEFAULT_FIELD_HEIGHT_CM)
@@ -381,13 +477,13 @@ class MainWindow(QtWidgets.QMainWindow):
         self.sp_accel_cm = QtWidgets.QDoubleSpinBox()
         self.sp_accel_cm.setRange(0, 200); self.sp_accel_cm.setDecimals(1); self.sp_accel_cm.setSuffix(" cm")
         self.sp_accel_cm.setValue(PROFILE_ACCEL_CM); self.sp_accel_cm.setSingleStep(1)
-        self.sp_accel_cm.setToolTip("路径开头多少 cm 用于加速（0=禁用）。上限自动限制为最短路径×35%")
+        self.sp_accel_cm.setToolTip("【闭环与开环都有效】起步这段 cm 距离内，功率从最小值线性爬到满；0=关闭（一下子满功率起步）。闭环下塑造的是“功率斜坡”而非真实 cm/s")
         f_speed.addRow("加速距离:", self.sp_accel_cm)
 
         self.sp_decel_cm = QtWidgets.QDoubleSpinBox()
         self.sp_decel_cm.setRange(0, 200); self.sp_decel_cm.setDecimals(1); self.sp_decel_cm.setSuffix(" cm")
         self.sp_decel_cm.setValue(PROFILE_DECEL_CM); self.sp_decel_cm.setSingleStep(1)
-        self.sp_decel_cm.setToolTip("路径结尾多少 cm 用于减速（0=禁用）。上限自动限制为最短路径×35%")
+        self.sp_decel_cm.setToolTip("【闭环与开环都有效】终点前这段 cm 距离内，功率从满降到最小值；0=关闭（不减速直接停）。闭环下塑造的是“功率斜坡”而非真实 cm/s")
         f_speed.addRow("减速距离:", self.sp_decel_cm)
 
         self.sp_max_speed = QtWidgets.QDoubleSpinBox()
@@ -408,10 +504,24 @@ class MainWindow(QtWidgets.QMainWindow):
         self.sp_rot_speed.setToolTip("自旋最高角速度（用于车头跟随模式）")
         f_speed.addRow("旋转速度:", self.sp_rot_speed)
 
+        self.sp_spin_precision = QtWidgets.QDoubleSpinBox()
+        self.sp_spin_precision.setRange(0.5, 40); self.sp_spin_precision.setDecimals(1)
+        self.sp_spin_precision.setSuffix(" cm"); self.sp_spin_precision.setValue(8.0)
+        self.sp_spin_precision.setSingleStep(0.5)
+        self.sp_spin_precision.setToolTip("行进中自旋精度：每个微步的弧长（cm）。越小转得越平滑越精准，但导出步数越多（三轮字节码有上限）")
+        f_speed.addRow("自旋精度:", self.sp_spin_precision)
+
         self.chk_curve = QtWidgets.QCheckBox("曲率自适应（弯减速/直加速）")
         self.chk_curve.setChecked(PROFILE_CURVE_ADAPTIVE)
         self.chk_curve.setToolTip("勾选：转弯自动降速 10%，直线自动提速 5%")
         f_speed.addRow(self.chk_curve)
+
+        self.chk_mec_closedloop = QtWidgets.QCheckBox("四轮编码器闭环（精准，牺牲速度）")
+        self.chk_mec_closedloop.setChecked(True)
+        self.chk_mec_closedloop.setToolTip(
+            "开：四轮曲线用编码器闭环逐步纠偏（各轮走到目标角度），消除 M3 功率飘忽，"
+            "但比开环时间驱动慢。关：回到旧的开环连续速度模式。仅四轮麦克纳姆生效")
+        f_speed.addRow(self.chk_mec_closedloop)
 
         outer.addWidget(g_speed)
 
@@ -478,6 +588,17 @@ class MainWindow(QtWidgets.QMainWindow):
         self.sp_cm_per_s.setToolTip("功率=50 时机器人实测前进速度（cm/s）。编码器标定跑完后用尺子量距离 ÷ 时间填入")
         f_cal.addRow("P50 直行:", self.sp_cm_per_s)
 
+        # P50 横移速度（四轮曲线速度模型）
+        self.sp_strafe_cm_per_s = QtWidgets.QDoubleSpinBox()
+        self.sp_strafe_cm_per_s.setRange(1, 300); self.sp_strafe_cm_per_s.setDecimals(1)
+        self.sp_strafe_cm_per_s.setValue(DEFAULT_STRAFE_CM_PER_SEC_AT_P50)
+        self.sp_strafe_cm_per_s.setSuffix(" cm/s")
+        self.sp_strafe_cm_per_s.setToolTip(
+            "功率=50 时机器人实测横移速度（cm/s）。\n"
+            "四轮曲线连续速度模式会用它修正 Vx 横移时间；横移偏小就把这里调小。"
+        )
+        f_cal.addRow("P50 横移:", self.sp_strafe_cm_per_s)
+
         # P50 旋转角速度
         self.sp_deg_per_s = QtWidgets.QDoubleSpinBox()
         self.sp_deg_per_s.setRange(5, 720); self.sp_deg_per_s.setDecimals(0)
@@ -486,14 +607,15 @@ class MainWindow(QtWidgets.QMainWindow):
         f_cal.addRow("P50 旋转:", self.sp_deg_per_s)
 
         self.sp_encoder_ticks_per_cm = QtWidgets.QDoubleSpinBox()
-        self.sp_encoder_ticks_per_cm.setRange(1, 200)
+        self.sp_encoder_ticks_per_cm.setRange(0, 200)
         self.sp_encoder_ticks_per_cm.setDecimals(3)
         self.sp_encoder_ticks_per_cm.setSingleStep(0.1)
         self.sp_encoder_ticks_per_cm.setSuffix(" °/cm")
-        self.sp_encoder_ticks_per_cm.setValue(ENCODER_TICKS_PER_CM)
+        self.sp_encoder_ticks_per_cm.setSpecialValueText("未标定")
+        self.sp_encoder_ticks_per_cm.setValue(0.0)
         self.sp_encoder_ticks_per_cm.setToolTip(
             "机器人实际每走 1 cm 需要的编码器角度。\n"
-            "用编码器标定自动计算；若实车偏小，通常是这里偏低。"
+            "每个底盘单独保存；未标定时不能导出自动程序。"
         )
         f_cal.addRow("编码器比例:", self.sp_encoder_ticks_per_cm)
 
@@ -526,8 +648,8 @@ class MainWindow(QtWidgets.QMainWindow):
 
         btn_enc_cal = QtWidgets.QPushButton("🔢 编码器标定")
         btn_enc_cal.setToolTip(
-            "写入编码器标定脚本：记录四轮 encoder delta。\n"
-            "烧录后按 + 键运行，结束后按机器人 N1/N2/N3/N4 键，\n"
+            "写入当前底盘的编码器标定脚本：记录各底盘电机 encoder delta。\n"
+            "烧录后按 + 键运行，结束后按机器人 N1 起的功能键，\n"
             "LED 显示对应电机编码器增量；再点「录入结果」填回 GUI。")
         btn_enc_cal.clicked.connect(self.on_encoder_calibration_export)
         cal_btn_h.addWidget(btn_enc_cal)
@@ -540,7 +662,7 @@ class MainWindow(QtWidgets.QMainWindow):
         cal_enter_h.setContentsMargins(0, 0, 0, 0); cal_enter_h.setSpacing(4)
         btn_enter_result = QtWidgets.QPushButton("📥 录入标定结果")
         btn_enter_result.setToolTip(
-            "从机器人 LED（N1-N4）读到编码器增量后，\n"
+            "从机器人 LED（N1 起的功能键）读到编码器增量后，\n"
             "在此输入实测距离 D 和增量值 → 自动计算编码器比例和 P50 直行速度。")
         btn_enter_result.clicked.connect(self.on_enter_calibration_results)
         cal_enter_h.addWidget(btn_enter_result)
@@ -762,8 +884,24 @@ class MainWindow(QtWidgets.QMainWindow):
         self.sp_obs_w.valueChanged.connect(self._on_obs_size_changed)
         self.sp_obs_h.valueChanged.connect(self._on_obs_size_changed)
         self.seq_tree.itemDoubleClicked.connect(self._on_seq_tree_double_clicked)
+        self.sp_encoder_ticks_per_cm.valueChanged.connect(
+            lambda *_: self._refresh_profile_calibration_label())
+        self.sp_cm_per_s.valueChanged.connect(
+            lambda *_: self._refresh_profile_calibration_label())
+        self.sp_strafe_cm_per_s.valueChanged.connect(
+            lambda *_: self._refresh_profile_calibration_label())
+        self.sp_encoder_ppr.valueChanged.connect(
+            lambda *_: self._refresh_profile_calibration_label())
         # 每段路径完成时推一个快照到撤销栈
         self.scene.path_finalized.connect(self._push_undo)
+        # 块被拖到头/尾后刷新序列树并存快照
+        self.scene.block_anchor_changed.connect(self._on_block_anchor_changed)
+
+    def _on_block_anchor_changed(self):
+        """某个执行块被拖到头部/尾部、归属改变后：刷新序列树并存快照。"""
+        self._refresh_seq_tree()
+        self._push_undo()
+        self._lbl_status.setText("已更新执行块的头/尾归属")
 
     def _set_field_size(self, width_cm, height_cm, update_controls=True):
         width_cm = float(width_cm)
@@ -881,24 +1019,292 @@ class MainWindow(QtWidgets.QMainWindow):
     def _current_mode(self):
         return MODE_HEADING if self.btn_mode.isChecked() else MODE_TRANSLATION
 
+    def _on_draw_tool_changed(self, kind):
+        """切换绘制工具：手绘 / 样条 / 直线。切换时取消正在进行的锚点放置。"""
+        self.scene.cancel_anchor_placement()
+        self.scene.draw_tool = kind
+        for k, btn in self._draw_tool_btns.items():
+            btn.setChecked(k == kind)
+        hints = {
+            "freehand": "手绘模式：按住左键拖动画线",
+            "spline": "样条模式：依次单击落控制点，双击/回车完成，Esc 取消。画完选中可拖控制点微调",
+            "line": "直线模式：依次单击落顶点，双击/回车完成，Esc 取消。画完选中可拖顶点微调",
+        }
+        self._lbl_status.setText(hints.get(kind, ""))
+
     def _current_profile(self):
         profile_id = self.combo_chassis.currentData()
         return get_profile(profile_id)
 
+    def _default_profile_calibration(self):
+        return {
+            "cm_per_second_at_power_50": DEFAULT_CM_PER_SEC_AT_P50,
+            "strafe_cm_per_second_at_power_50": DEFAULT_STRAFE_CM_PER_SEC_AT_P50,
+            "deg_per_second_at_omega_50": DEFAULT_DEG_PER_SEC_AT_OMEGA50,
+            "auto_power": DEFAULT_AUTO_POWER,
+            "omega_power": DEFAULT_OMEGA_POWER,
+            # 0 means this chassis has not been calibrated yet.
+            "encoder_ticks_per_cm": 0.0,
+            "distance_scale": DEFAULT_DISTANCE_SCALE,
+            "encoder_ppr": 0,
+            "front_back_compensation": DEFAULT_FRONT_BACK_COMPENSATION,
+            "rotation_balance": DEFAULT_ROTATION_BALANCE,
+            "strafe_vy_coupling": DEFAULT_STRAFE_VY_COUPLING,
+        }
+
+    def _default_profile_settings(self):
+        return {
+            "mode": MODE_TRANSLATION,
+            "invert_x": DEFAULT_INVERT_X,
+            "invert_y": DEFAULT_INVERT_Y,
+            "ramp_ms": DEFAULT_RAMP_MS,
+            "ramp_enabled": RAMP_ENABLED,
+            "ramp_time": DEFAULT_RAMP_TIME,
+            "ramp_steps": DEFAULT_RAMP_STEPS,
+            "accel_cm": PROFILE_ACCEL_CM,
+            "decel_cm": PROFILE_DECEL_CM,
+            "max_speed": PROFILE_MAX_SPEED,
+            "min_speed": PROFILE_MIN_SPEED,
+            "rot_speed": PROFILE_ROT_SPEED,
+            "curve_adaptive": PROFILE_CURVE_ADAPTIVE,
+        }
+
+    def _default_profile_params(self):
+        return {
+            "calibration": self._default_profile_calibration(),
+            "settings": self._default_profile_settings(),
+        }
+
+    def _reset_profile_params(self):
+        self._profile_params = {
+            p.profile_id: self._default_profile_params()
+            for p in CHASSIS_PROFILES
+        }
+
+    @staticmethod
+    def _copy_profile_params_entry(entry):
+        return {
+            "calibration": dict(entry.get("calibration", {})),
+            "settings": dict(entry.get("settings", {})),
+        }
+
+    def _collect_profile_calibration_from_controls(self):
+        return {
+            "cm_per_second_at_power_50": float(self.sp_cm_per_s.value()),
+            "strafe_cm_per_second_at_power_50": float(self.sp_strafe_cm_per_s.value()),
+            "deg_per_second_at_omega_50": float(self.sp_deg_per_s.value()),
+            "auto_power": int(self.sp_auto_power.value()),
+            "omega_power": int(self.sp_omega_power.value()),
+            "encoder_ticks_per_cm": float(self.sp_encoder_ticks_per_cm.value()),
+            "distance_scale": float(self.sp_distance_scale.value()),
+            "encoder_ppr": int(self.sp_encoder_ppr.value()),
+            "front_back_compensation": float(self.sp_front_back_comp.value()),
+            "rotation_balance": float(self.sp_rotation_balance.value()),
+            "strafe_vy_coupling": float(self.sp_strafe_coupling.value()),
+        }
+
+    def _collect_profile_settings_from_controls(self):
+        return {
+            "mode": self._current_mode(),
+            "invert_x": bool(self.chk_invert_x.isChecked()),
+            "invert_y": bool(self.chk_invert_y.isChecked()),
+            "ramp_ms": int(self.sp_ramp_ms.value()),
+            "ramp_enabled": bool(self.chk_ramp.isChecked()),
+            "ramp_time": float(self.sp_ramp_time.value()),
+            "ramp_steps": int(self.sp_ramp_steps.value()),
+            "accel_cm": float(self.sp_accel_cm.value()),
+            "decel_cm": float(self.sp_decel_cm.value()),
+            "max_speed": float(self.sp_max_speed.value()),
+            "min_speed": float(self.sp_min_speed.value()),
+            "rot_speed": float(self.sp_rot_speed.value()),
+            "curve_adaptive": bool(self.chk_curve.isChecked()),
+            "mecanum_closed_loop": bool(self.chk_mec_closedloop.isChecked()),
+        }
+
+    def _store_current_profile_params(self, profile_id=None):
+        if self._loading_profile_params:
+            return
+        pid = profile_id or self._active_profile_id or self._current_profile().profile_id
+        self._profile_params[pid] = {
+            "calibration": self._collect_profile_calibration_from_controls(),
+            "settings": self._collect_profile_settings_from_controls(),
+        }
+
+    def _load_profile_params_to_controls(self, profile_id):
+        entry = self._profile_params.setdefault(profile_id, self._default_profile_params())
+        cal = dict(self._default_profile_calibration())
+        cal.update(entry.get("calibration", {}))
+        settings = dict(self._default_profile_settings())
+        settings.update(entry.get("settings", {}))
+
+        self._loading_profile_params = True
+        try:
+            self.sp_cm_per_s.setValue(float(cal["cm_per_second_at_power_50"]))
+            self.sp_strafe_cm_per_s.setValue(float(cal["strafe_cm_per_second_at_power_50"]))
+            self.sp_deg_per_s.setValue(float(cal["deg_per_second_at_omega_50"]))
+            self.sp_auto_power.setValue(int(cal["auto_power"]))
+            self.sp_omega_power.setValue(int(cal["omega_power"]))
+            self.sp_encoder_ticks_per_cm.setValue(float(cal["encoder_ticks_per_cm"]))
+            self.sp_distance_scale.setValue(float(cal["distance_scale"]))
+            self.sp_encoder_ppr.setValue(int(cal.get("encoder_ppr", 0)))
+            self.sp_front_back_comp.setValue(float(cal["front_back_compensation"]))
+            self.sp_rotation_balance.setValue(float(cal["rotation_balance"]))
+            self.sp_strafe_coupling.setValue(float(cal["strafe_vy_coupling"]))
+
+            self.btn_mode.setChecked(settings.get("mode", MODE_TRANSLATION) == MODE_HEADING)
+            self._on_toggle_mode()
+            self.chk_invert_x.setChecked(bool(settings["invert_x"]))
+            self.chk_invert_y.setChecked(bool(settings["invert_y"]))
+            self.sp_ramp_ms.setValue(int(settings["ramp_ms"]))
+            self.chk_ramp.setChecked(bool(settings["ramp_enabled"]))
+            self.sp_ramp_time.setValue(float(settings["ramp_time"]))
+            self.sp_ramp_steps.setValue(int(settings["ramp_steps"]))
+            self.sp_accel_cm.setValue(float(settings["accel_cm"]))
+            self.sp_decel_cm.setValue(float(settings["decel_cm"]))
+            self.sp_max_speed.setValue(float(settings["max_speed"]))
+            self.sp_min_speed.setValue(float(settings["min_speed"]))
+            self.sp_rot_speed.setValue(float(settings["rot_speed"]))
+            self.chk_curve.setChecked(bool(settings["curve_adaptive"]))
+            if "mecanum_closed_loop" in settings:
+                self.chk_mec_closedloop.setChecked(bool(settings["mecanum_closed_loop"]))
+        finally:
+            self._loading_profile_params = False
+
+        self._refresh_profile_calibration_label()
+
+    def _profile_params_for_payload(self):
+        return {
+            pid: self._copy_profile_params_entry(entry)
+            for pid, entry in self._profile_params.items()
+        }
+
+    def _profile_params_from_payload(self, data):
+        params = {
+            p.profile_id: self._default_profile_params()
+            for p in CHASSIS_PROFILES
+        }
+
+        raw_profiles = data.get("profile_params", {})
+        if isinstance(raw_profiles, dict):
+            for pid, raw_entry in raw_profiles.items():
+                pid = normalize_profile_id(pid)
+                if pid not in params or not isinstance(raw_entry, dict):
+                    continue
+                cal = raw_entry.get("calibration", {})
+                settings = raw_entry.get("settings", {})
+                if isinstance(cal, dict):
+                    params[pid]["calibration"].update({
+                        k: cal[k] for k in self.PROFILE_CALIBRATION_KEYS if k in cal
+                    })
+                if isinstance(settings, dict):
+                    params[pid]["settings"].update({
+                        k: settings[k] for k in self.PROFILE_SETTING_KEYS if k in settings
+                    })
+
+        # Legacy JSON had one global calibration/settings block. Treat it as
+        # belonging only to the selected chassis, so other chassis stay blank.
+        legacy_settings = data.get("settings", {})
+        legacy_profile_id = normalize_profile_id(
+            legacy_settings.get("chassis_profile_id", DEFAULT_PROFILE_ID)
+        )
+        if legacy_profile_id not in params:
+            legacy_profile_id = DEFAULT_PROFILE_ID
+
+        legacy_cal = data.get("calibration", {})
+        if isinstance(legacy_cal, dict):
+            params[legacy_profile_id]["calibration"].update({
+                k: legacy_cal[k] for k in self.PROFILE_CALIBRATION_KEYS if k in legacy_cal
+            })
+        if isinstance(legacy_settings, dict):
+            params[legacy_profile_id]["settings"].update({
+                k: legacy_settings[k] for k in self.PROFILE_SETTING_KEYS if k in legacy_settings
+            })
+        return params
+
+    def _set_current_profile_id(self, profile_id):
+        profile_id = normalize_profile_id(profile_id)
+        found_idx = None
+        for i in range(self.combo_chassis.count()):
+            if self.combo_chassis.itemData(i) == profile_id:
+                found_idx = i
+                break
+        if found_idx is None:
+            found_idx = 0
+            profile_id = self.combo_chassis.itemData(0)
+        self.combo_chassis.blockSignals(True)
+        self.combo_chassis.setCurrentIndex(found_idx)
+        self.combo_chassis.blockSignals(False)
+        self._active_profile_id = profile_id
+        return profile_id
+
+    def _refresh_profile_calibration_label(self):
+        profile = self._current_profile()
+        ticks = float(self.sp_encoder_ticks_per_cm.value())
+        if ticks <= 0:
+            self.lbl_cal_result.setText(
+                "%s：尚未录入编码器比例。\n"
+                "先点「编码器标定」，跑完后点「录入标定结果」。"
+                % profile.display_name
+            )
+        else:
+            self.lbl_cal_result.setText(
+                "%s：已录入编码器 %.3f °/cm，P50 直行 %.1f cm/s，横移 %.1f cm/s，PPR=%d"
+                % (
+                    profile.display_name,
+                    ticks,
+                    self.sp_cm_per_s.value(),
+                    self.sp_strafe_cm_per_s.value(),
+                    self.sp_encoder_ppr.value(),
+                )
+            )
+
     def _encoder_ticks_per_cm(self):
-        return max(0.001, float(self.sp_encoder_ticks_per_cm.value()))
+        return float(self.sp_encoder_ticks_per_cm.value())
 
     def _export_ticks_per_cm(self):
-        return self._encoder_ticks_per_cm() * max(0.001, float(self.sp_distance_scale.value()))
+        return max(0.001, self._encoder_ticks_per_cm()) * max(0.001, float(self.sp_distance_scale.value()))
 
     def _sync_active_vehicle(self):
         """把工具栏选中的底盘同步到场景"""
         profile = self._current_profile()
         self.scene.active_vehicle_id = profile.profile_id
         self.scene.active_vehicle_color = profile.color
+        self.scene.set_center_safe_area(
+            profile.robot_width_cm,
+            profile.robot_length_cm,
+            CENTER_SAFETY_MARGIN_CM,
+        )
+
+    def _center_safe_margins(self):
+        profile = self._current_profile()
+        mx = profile.robot_width_cm / 2.0 + CENTER_SAFETY_MARGIN_CM
+        my = profile.robot_length_cm / 2.0 + CENTER_SAFETY_MARGIN_CM
+        return mx, my
+
+    def _current_path_center_violations(self):
+        """返回当前底盘路径中越过中心点安全区的点。"""
+        w, h = self.scene.field_size()
+        mx, my = self._center_safe_margins()
+        current_vid = self._current_profile().profile_id
+        bad = []
+        for i, seg in enumerate(self.scene.path_segments):
+            vid = (self.scene.segment_vehicle_ids[i]
+                   if i < len(self.scene.segment_vehicle_ids) else "")
+            if vid and vid != current_vid:
+                continue
+            pts = seg.smoothed_points or seg.raw_points
+            for x, y in pts:
+                if x < mx or x > w - mx or y < my or y > h - my:
+                    bad.append((i + 1, x, y))
+                    break
+        return bad
 
     def _on_chassis_changed(self, index):
+        if not self._loading_profile_params:
+            self._store_current_profile_params(self._active_profile_id)
         profile = self._current_profile()
+        self._active_profile_id = profile.profile_id
+        self._load_profile_params_to_controls(profile.profile_id)
         self.lbl_chassis_desc.setText(profile.description)
         self._refresh_hint_label()
         self._sync_active_vehicle()
@@ -954,7 +1360,9 @@ class MainWindow(QtWidgets.QMainWindow):
             lines.append("1) 四轮麦克纳姆前后对称，无需切换正面")
         lines.append("2) 任何参数改了之后必须点「导出到机器人」才会生效")
         lines.append("3) 前后补偿会写入机器人 FRONT_BACK_COMPENSATION 常量，手动/自动均生效")
-        lines.append("4) 导出目标文件: %s" % profile.file_path.name)
+        lines.append("4) 中心点安全区按车身 %.0f×%.0f cm 计算" % (
+            profile.robot_length_cm, profile.robot_width_cm))
+        lines.append("5) 导出目标文件: %s" % profile.file_path.name)
         self.lbl_face.setText("提示：\n" + "\n".join(lines))
 
     # ---- 工具栏动作 ----
@@ -977,7 +1385,7 @@ class MainWindow(QtWidgets.QMainWindow):
             return
 
         payload = self._build_current_payload()
-        target = next_filename()
+        target = self._current_file or next_filename()
         try:
             saved = save_trajectory(payload, target)
         except Exception as e:
@@ -1088,10 +1496,39 @@ class MainWindow(QtWidgets.QMainWindow):
         if not has_path:
             QtWidgets.QMessageBox.information(self, "导出", "请先画一条轨迹。")
             return
+        if self._encoder_ticks_per_cm() <= 0:
+            QtWidgets.QMessageBox.warning(
+                self, "当前底盘未标定",
+                "%s 还没有录入「编码器比例」。\n\n"
+                "请先执行编码器标定，或点「录入标定结果」填入该底盘自己的数值。"
+                % self._current_profile().display_name
+            )
+            return
+        violations = self._current_path_center_violations()
+        if violations:
+            mx, my = self._center_safe_margins()
+            seg_idx, x, y = violations[0]
+            if not self._confirm(
+                "当前路径有中心点进入车身死区。\n\n"
+                "当前底盘：%s（长 %.1f cm，宽 %.1f cm）\n"
+                "中心点至少要离左右边界 %.1f cm，离前后边界 %.1f cm。\n"
+                "第 %d 段附近点：X=%.1f, Y=%.1f\n\n"
+                "仍然导出？" % (
+                    self._current_profile().display_name,
+                    self._current_profile().robot_length_cm,
+                    self._current_profile().robot_width_cm,
+                    mx, my, seg_idx, x, y,
+                )
+            ):
+                return
         sequence = self._build_combined_sequence()
         if not self._confirm_export(sequence):
             return
         profile = self._current_profile()
+        uses_continuous_traj = any(
+            isinstance(s[0], str) and s[0] == "traj_v"
+            for s in sequence
+        )
         try:
             backup, _ = write_auto_sequence(
                 sequence,
@@ -1101,7 +1538,7 @@ class MainWindow(QtWidgets.QMainWindow):
                 cm_per_s_at_p50=self.sp_max_speed.value(),
                 auto_power=self.sp_auto_power.value(),
                 ramp_ms=self.sp_ramp_ms.value(),
-                encoder_based=True,
+                encoder_based=not uses_continuous_traj,
                 encoder_ticks_per_cm=self._encoder_ticks_per_cm(),
                 front_back_compensation=self.sp_front_back_comp.value(),
                 rotation_balance=self.sp_rotation_balance.value(),
@@ -1112,10 +1549,12 @@ class MainWindow(QtWidgets.QMainWindow):
             return
         QtWidgets.QMessageBox.information(
             self, "导出成功",
-            "已写入 %s\n编码器闭环模式 | 共 %d 步\n"
+            "已写入 %s\n%s | 共 %d 步\n"
             "匀速目标: %.0f cm/s | 编码器 %.3f °/cm | 实车倍率 %.3f×\n"
             "加速 %.0fcm 减速 %.0fcm\n备份: %s" % (
-                profile.file_path.name, len(sequence),
+                profile.file_path.name,
+                "连续曲线速度模式" if uses_continuous_traj else "编码器闭环模式",
+                len(sequence),
                 self.sp_max_speed.value(), self._encoder_ticks_per_cm(), self.sp_distance_scale.value(),
                 self.sp_accel_cm.value() if self.chk_ramp.isChecked() else 0.0,
                 self.sp_decel_cm.value() if self.chk_ramp.isChecked() else 0.0,
@@ -1126,17 +1565,18 @@ class MainWindow(QtWidgets.QMainWindow):
     def on_encoder_calibration_export(self):
         """导出编码器标定脚本：直走并将增量存入机器人 LED 可查询变量"""
         profile = self._current_profile()
+        n_keys = "N1~N%d" % profile.wheel_count
         if not self._confirm(
             "编码器标定 — 向 %s 写入：\n"
-            "  记录四轮编码器初始值 → P50 直行 1 秒 → 记录增量\n"
-            "  标定结束后可按机器人 N1/N2/N3/N4 键逐个查看增量\n\n"
+            "  记录 %d 个底盘电机编码器初始值 → P50 直行 1 秒 → 记录增量\n"
+            "  标定结束后可按机器人 %s 键逐个查看增量\n\n"
             "流程：\n"
             "  ① 烧录，地上画起跑线\n"
             "  ② 按 + 键运行（约走 20~40 cm）\n"
             "  ③ 用尺子量距离 D（cm）\n"
-            "  ④ 按 N1/N2/N3/N4 查看 LED 上的编码器增量（E####）\n"
-            "  ⑤ 回到 GUI 点「录入标定结果」，填入 D 和四轮增量，自动推算 °/cm\n\n"
-            "确认写入？" % profile.file_path.name
+            "  ④ 按 %s 查看 LED 上的编码器增量（E####）\n"
+            "  ⑤ 回到 GUI 点「录入标定结果」，填入 D 和对应增量，自动推算 °/cm\n\n"
+            "确认写入？" % (profile.file_path.name, profile.wheel_count, n_keys, n_keys)
         ):
             return
         seq = [("encoder_cal", 1.0, 0, 50, 0), STOP_BUFFER]
@@ -1158,16 +1598,17 @@ class MainWindow(QtWidgets.QMainWindow):
             "烧录后：\n"
             "1. 按 + 键启动，机器人直走约 1 秒后停止\n"
             "2. 用尺子量距离 D（cm）\n"
-            "3. 按 N1/N2/N3/N4 键，LED 逐个显示四轮编码器增量\n"
+            "3. 按 %s 键，LED 逐个显示底盘电机编码器增量\n"
             "   每按一次显示对应电机，格式：E1234\n"
             "4. 回到 GUI → 右侧面板 → 点「📥 录入标定结果」自动推算"
-            % (profile.file_path.name, backup.name),
+            % (profile.file_path.name, backup.name, n_keys),
         )
 
     def on_enter_calibration_results(self):
-        """弹出对话框，填入实测距离和四轮编码器增量，自动推算 °/cm 和 P50 直行速度"""
+        """弹出对话框，填入实测距离和各轮编码器增量，自动推算 °/cm 和 P50 直行速度"""
+        profile = self._current_profile()
         dlg = QtWidgets.QDialog(self)
-        dlg.setWindowTitle("录入编码器标定结果")
+        dlg.setWindowTitle("录入编码器标定结果 - %s" % profile.display_name)
         dlg.setMinimumWidth(340)
         layout = QtWidgets.QFormLayout(dlg)
 
@@ -1178,7 +1619,7 @@ class MainWindow(QtWidgets.QMainWindow):
         layout.addRow("实测距离 D:", sp_dist)
 
         sp_m = []
-        for i in range(1, 5):
+        for i in range(1, profile.wheel_count + 1):
             sp = QtWidgets.QSpinBox()
             sp.setRange(-99999, 99999); sp.setValue(0)
             sp.setToolTip("按 N%d 后 LED 显示的编码器增量（E#### 中的数字）" % i)
@@ -1216,16 +1657,19 @@ class MainWindow(QtWidgets.QMainWindow):
         self.sp_distance_scale.setValue(1.0)
         self.sp_cm_per_s.setValue(round(cm_per_s, 1))
 
-        delta_str = "  ".join("M%d=%d" % (i + 1, deltas[i]) for i in range(4))
+        self._store_current_profile_params(profile.profile_id)
+
+        delta_str = "  ".join("M%d=%d" % (i + 1, deltas[i]) for i in range(len(deltas)))
         self.lbl_cal_result.setText(
-            "标定结果（D=%.1f cm）：\n"
+            "%s 标定结果（D=%.1f cm）：\n"
             "%s\n"
             "平均增量 %.0f → 编码器比例 %.3f °/cm → 推算 PPR=%.0f\n"
             "P50 直行已更新为 %.1f cm/s"
-            % (D, delta_str, avg_delta, deg_per_cm, ppr_calc, cm_per_s)
+            % (profile.display_name, D, delta_str, avg_delta, deg_per_cm, ppr_calc, cm_per_s)
         )
         self._lbl_status.setText(
-            "标定结果已录入：%.3f °/cm，P50=%.1f cm/s" % (deg_per_cm, cm_per_s)
+            "%s 标定结果已录入：%.3f °/cm，P50=%.1f cm/s（Ctrl+S 保存到 JSON）" %
+            (profile.display_name, deg_per_cm, cm_per_s)
         )
 
     def on_add_obstacle(self):
@@ -1301,7 +1745,9 @@ class MainWindow(QtWidgets.QMainWindow):
             return
         self.scene.add_action_block(idx, block)
         self._refresh_seq_tree()
-        self._lbl_status.setText("已添加 %s 块到路段 %d" % (block.type_label(), idx + 1))
+        self._lbl_status.setText(
+            "已添加 %s 块到路段 %d（默认在曲线后执行；右键块可设为曲线前执行）"
+            % (block.type_label(), idx + 1))
 
     def on_add_servo_block(self):
         self._add_block(ActionBlockItem.TYPE_SERVO)
@@ -1330,7 +1776,8 @@ class MainWindow(QtWidgets.QMainWindow):
             return
         block = item.data(0, QtCore.Qt.UserRole + 1)
         if block and block.open_edit_dialog(self):
-            item.setText(0, block.label_text())
+            prefix = "▲头 " if getattr(block, "anchor", "tail") == "head" else "▼尾 "
+            item.setText(0, prefix + block.label_text())
             self._lbl_status.setText("已更新执行块")
 
     def on_delete_block(self):
@@ -1367,7 +1814,8 @@ class MainWindow(QtWidgets.QMainWindow):
         if item.parent() is not None:
             block = item.data(0, QtCore.Qt.UserRole + 1)
             if block and block.open_edit_dialog(self):
-                item.setText(0, block.label_text())
+                prefix = "▲头 " if getattr(block, "anchor", "tail") == "head" else "▼尾 "
+                item.setText(0, prefix + block.label_text())
 
     def _refresh_seq_tree(self):
         self.seq_tree.clear()
@@ -1387,7 +1835,10 @@ class MainWindow(QtWidgets.QMainWindow):
             seg_item.setData(0, QtCore.Qt.UserRole, i)
             seg_item.setExpanded(True)
             for block in self.scene.action_chains[i]:
-                block_item = QtWidgets.QTreeWidgetItem(seg_item, [block.label_text()])
+                is_head = getattr(block, "anchor", "tail") == "head"
+                prefix = "▲头 " if is_head else "▼尾 "
+                block_item = QtWidgets.QTreeWidgetItem(
+                    seg_item, [prefix + block.label_text()])
                 block_item.setData(0, QtCore.Qt.UserRole + 1, block)
                 block_item.setForeground(0, QtGui.QBrush(block.border_color()))
 
@@ -1459,14 +1910,77 @@ class MainWindow(QtWidgets.QMainWindow):
         curve_on = self.chk_curve.isChecked()
         ticks_per_cm = self._export_ticks_per_cm()
         current_vid = self._current_profile().profile_id
+        # 四轮默认走编码器闭环（与三轮同一套 build_encoder_sequence）；
+        # 只有手动关闭“四轮编码器闭环”开关时，才回到旧的开环时间驱动 traj_v。
+        enc_closed_loop_4w = True
+        try:
+            enc_closed_loop_4w = self.chk_mec_closedloop.isChecked()
+        except AttributeError:
+            enc_closed_loop_4w = True
+        use_continuous_traj = (
+            current_vid == "mecanum_4w"
+            and mode == MODE_TRANSLATION
+            and not enc_closed_loop_4w
+        )
+
+        def emit_blocks(blocks):
+            """把一组执行块转成序列步骤并追加到 seq。"""
+            for block in blocks:
+                seq.extend(block.to_sequence_steps(
+                    self.sp_cm_per_s.value() if use_continuous_traj else max_spd,
+                    auto_power,
+                    encoder_based=not use_continuous_traj,
+                    ticks_per_cm=ticks_per_cm,
+                ))
 
         for i, seg in enumerate(self.scene.path_segments):
             vid = (self.scene.segment_vehicle_ids[i]
                    if i < len(self.scene.segment_vehicle_ids) else "")
             if vid and vid != current_vid:
                 continue
+
+            # 头部块：在本段曲线开始之前执行
+            chain = self.scene.action_chains[i]
+            head_blocks = [b for b in chain
+                           if getattr(b, "anchor", "tail") == "head"]
+            tail_blocks = [b for b in chain
+                           if getattr(b, "anchor", "tail") != "head"]
+            if head_blocks:
+                emit_blocks(head_blocks)
+                if use_continuous_traj:
+                    if seq and not (isinstance(seq[-1][0], str)
+                                    and seq[-1][0] in ('traj_stop', 'enc_stop')):
+                        seq.append(('traj_stop', 0, 0, 0))
+
             if len(seg.smoothed_points) >= 2:
-                if mode == MODE_HEADING:
+                seg_spin = float(getattr(seg, "travel_spin_deg", 0.0) or 0.0)
+                if abs(seg_spin) >= 1.0 and current_vid in ("omni3", "mecanum_4w"):
+                    # 行进中自旋（方案 C）：整段边走边转，微步 enc_moverot 闭环
+                    seg_seq = build_travel_spin_sequence(
+                        seg.smoothed_points, auto_power, omega_power,
+                        total_spin_deg=seg_spin,
+                        base_speed_cm_s=max_spd,
+                        ticks_per_cm=ticks_per_cm,
+                        invert_x=inv_x, invert_y=inv_y,
+                        spin_precision_cm=self.sp_spin_precision.value(),
+                    )
+                elif use_continuous_traj:
+                    seg_seq = build_velocity_sequence(
+                        seg.smoothed_points,
+                        cm_per_s_at_p50=self.sp_cm_per_s.value(),
+                        auto_power=auto_power,
+                        target_speed_cm_s=max_spd,
+                        strafe_cm_s_at_p50=self.sp_strafe_cm_per_s.value(),
+                        sample_dt=DEFAULT_TRAJ_SAMPLE_DT,
+                        invert_x=inv_x,
+                        invert_y=inv_y,
+                        accel_cm=accel_cm,
+                        decel_cm=decel_cm,
+                        min_speed=min_spd,
+                        curve_adaptive=curve_on,
+                        add_stop=False,
+                    )
+                elif mode == MODE_HEADING:
                     seg_seq = build_encoder_sequence_heading(
                         seg.smoothed_points, auto_power, omega_power,
                         base_speed_cm_s=max_spd, base_rot_deg_s=rot_spd,
@@ -1486,14 +2000,30 @@ class MainWindow(QtWidgets.QMainWindow):
                         curve_adaptive=curve_on,
                     )
                 # v5.1: 合并连续同向小步，消除步间停顿
-                seg_seq = merge_enc_sequence(seg_seq)
+                if not use_continuous_traj:
+                    seg_seq = merge_enc_sequence(seg_seq)
+                # 四轮/三轮闭环平移：合并后把逐段 enc_move（move() 位置模式，逐段减速卡顿）
+                # 转成 enc_flow（连续速度闭环，段间不停，只末段减速），消除"一格一格"
+                if (current_vid == "mecanum_4w" and enc_closed_loop_4w
+                        and not use_continuous_traj and abs(seg_spin) < 1.0
+                        and mode != MODE_HEADING):
+                    seg_seq = [
+                        (("enc_flow",) + tuple(s[1:])) if (isinstance(s[0], str) and s[0] == "enc_move") else s
+                        for s in seg_seq
+                    ]
                 seq.extend(seg_seq)
-            for block in self.scene.action_chains[i]:
-                seq.extend(block.to_sequence_steps(
-                    max_spd, auto_power,
-                    encoder_based=True,
-                    ticks_per_cm=ticks_per_cm,
-                ))
+
+            # 尾部块：在本段曲线跑完之后执行
+            if use_continuous_traj and tail_blocks:
+                if seq and not (isinstance(seq[-1][0], str) and seq[-1][0] in ('traj_stop', 'enc_stop')):
+                    seq.append(('traj_stop', 0, 0, 0))
+
+            emit_blocks(tail_blocks)
+
+        if use_continuous_traj:
+            if seq and not (isinstance(seq[-1][0], str) and seq[-1][0] in ('traj_stop', 'enc_stop')):
+                seq.append(('traj_stop', 0, 0, 0))
+            return seq
 
         # v5.2: 清理多余的 enc_stop — 只保留序列末尾的最后一个
         #        中间多余的 enc_stop 会打断多段路径的无缝衔接
@@ -1511,37 +2041,17 @@ class MainWindow(QtWidgets.QMainWindow):
 
     # ---- 数据交换 ----
     def _build_current_payload(self):
+        self._store_current_profile_params()
         w, h = self.scene.field_size()
-        calibration = {
-            "cm_per_second_at_power_50": self.sp_cm_per_s.value(),
-            "deg_per_second_at_omega_50": self.sp_deg_per_s.value(),
-            "auto_power": self.sp_auto_power.value(),
-            "omega_power": self.sp_omega_power.value(),
-            "encoder_ticks_per_cm": self.sp_encoder_ticks_per_cm.value(),
-            "distance_scale": self.sp_distance_scale.value(),
-            "front_back_compensation": self.sp_front_back_comp.value(),
-            "rotation_balance": self.sp_rotation_balance.value(),
-            "strafe_vy_coupling": self.sp_strafe_coupling.value(),
-        }
-        settings = {
-            "mode": self._current_mode(),
+        current_pid = self._current_profile().profile_id
+        current_entry = self._profile_params.get(current_pid, self._default_profile_params())
+        calibration = dict(current_entry.get("calibration", {}))
+        settings = dict(current_entry.get("settings", {}))
+        settings.update({
             "smoothing_iterations": self.sp_smooth.value(),
             "resample_step_cm": self.sp_resample.value(),
-            "invert_x": self.chk_invert_x.isChecked(),
-            "invert_y": self.chk_invert_y.isChecked(),
-            "ramp_ms": self.sp_ramp_ms.value(),
-            "chassis_profile_id": self._current_profile().profile_id,
-            "ramp_enabled": self.chk_ramp.isChecked(),
-            "ramp_time": self.sp_ramp_time.value(),
-            "ramp_steps": self.sp_ramp_steps.value(),
-            # 速度曲线
-            "accel_cm": self.sp_accel_cm.value(),
-            "decel_cm": self.sp_decel_cm.value(),
-            "max_speed": self.sp_max_speed.value(),
-            "min_speed": self.sp_min_speed.value(),
-            "rot_speed": self.sp_rot_speed.value(),
-            "curve_adaptive": self.chk_curve.isChecked(),
-        }
+            "chassis_profile_id": current_pid,
+        })
         obstacles = [o.to_dict() for o in self.scene.obstacles()]
         path_segments = [
             (seg.raw_points, seg.smoothed_points)
@@ -1552,12 +2062,15 @@ class MainWindow(QtWidgets.QMainWindow):
             for chain in self.scene.action_chains
         ]
         segment_vehicle_ids = list(self.scene.segment_vehicle_ids)
+        segment_curves = [seg.curve_to_dict() for seg in self.scene.path_segments]
         first_raw = path_segments[0][0] if path_segments else []
         first_smooth = path_segments[0][1] if path_segments else []
         return build_payload(
             w, h, calibration, settings, first_raw, first_smooth, obstacles,
             path_segments=path_segments, action_chains=action_chains,
             segment_vehicle_ids=segment_vehicle_ids,
+            segment_curves=segment_curves,
+            profile_params=self._profile_params_for_payload(),
         )
 
     def _apply_payload(self, data):
@@ -1567,47 +2080,30 @@ class MainWindow(QtWidgets.QMainWindow):
             float(field.get("height_cm", DEFAULT_FIELD_HEIGHT_CM)),
         )
 
-        cal = data.get("calibration", {})
-        self.sp_cm_per_s.setValue(float(cal.get("cm_per_second_at_power_50", DEFAULT_CM_PER_SEC_AT_P50)))
-        self.sp_deg_per_s.setValue(float(cal.get("deg_per_second_at_omega_50", DEFAULT_DEG_PER_SEC_AT_OMEGA50)))
-        self.sp_auto_power.setValue(int(cal.get("auto_power", DEFAULT_AUTO_POWER)))
-        self.sp_omega_power.setValue(int(cal.get("omega_power", DEFAULT_OMEGA_POWER)))
-        self.sp_encoder_ticks_per_cm.setValue(float(cal.get("encoder_ticks_per_cm", ENCODER_TICKS_PER_CM)))
-        self.sp_distance_scale.setValue(float(cal.get("distance_scale", DEFAULT_DISTANCE_SCALE)))
-        self.sp_front_back_comp.setValue(float(cal.get("front_back_compensation", DEFAULT_FRONT_BACK_COMPENSATION)))
-        self.sp_rotation_balance.setValue(float(cal.get("rotation_balance", DEFAULT_ROTATION_BALANCE)))
-        self.sp_strafe_coupling.setValue(float(cal.get("strafe_vy_coupling", DEFAULT_STRAFE_VY_COUPLING)))
-
         settings = data.get("settings", {})
-        mode = settings.get("mode", MODE_TRANSLATION)
-        self.btn_mode.setChecked(mode == MODE_HEADING)
-        self._on_toggle_mode()
+        self._profile_params = self._profile_params_from_payload(data)
+        profile_id = settings.get("chassis_profile_id", DEFAULT_PROFILE_ID)
+        profile_id = self._set_current_profile_id(profile_id)
+        self._load_profile_params_to_controls(profile_id)
+
         self.sp_smooth.setValue(int(settings.get("smoothing_iterations", DEFAULT_SMOOTH_ITER)))
         self.sp_resample.setValue(float(settings.get("resample_step_cm", DEFAULT_RESAMPLE_CM)))
-        self.chk_invert_x.setChecked(bool(settings.get("invert_x", DEFAULT_INVERT_X)))
-        self.chk_invert_y.setChecked(bool(settings.get("invert_y", DEFAULT_INVERT_Y)))
-        self.sp_ramp_ms.setValue(int(settings.get("ramp_ms", DEFAULT_RAMP_MS)))
-        self.chk_ramp.setChecked(bool(settings.get("ramp_enabled", RAMP_ENABLED)))
-        self.sp_ramp_time.setValue(float(settings.get("ramp_time", DEFAULT_RAMP_TIME)))
-        self.sp_ramp_steps.setValue(int(settings.get("ramp_steps", DEFAULT_RAMP_STEPS)))
-        self.sp_accel_cm.setValue(float(settings.get("accel_cm", PROFILE_ACCEL_CM)))
-        self.sp_decel_cm.setValue(float(settings.get("decel_cm", PROFILE_DECEL_CM)))
-        self.sp_max_speed.setValue(float(settings.get("max_speed", PROFILE_MAX_SPEED)))
-        self.sp_min_speed.setValue(float(settings.get("min_speed", PROFILE_MIN_SPEED)))
-        self.sp_rot_speed.setValue(float(settings.get("rot_speed", PROFILE_ROT_SPEED)))
-        self.chk_curve.setChecked(bool(settings.get("curve_adaptive", PROFILE_CURVE_ADAPTIVE)))
-        profile_id = settings.get("chassis_profile_id", DEFAULT_PROFILE_ID)
-        for i in range(self.combo_chassis.count()):
-            if self.combo_chassis.itemData(i) == profile_id:
-                self.combo_chassis.setCurrentIndex(i)
-                break
+        self.lbl_chassis_desc.setText(self._current_profile().description)
+        self._refresh_hint_label()
+        self._sync_active_vehicle()
+        self._update_chassis_specific_buttons()
 
         self.scene.clear_path()
         self.scene.clear_obstacles()
 
         # 优先读新格式 segments，降级到旧格式 path
         if "segments" in data:
-            segments_data = data["segments"]
+            segments_data = []
+            for seg in data["segments"]:
+                seg_copy = dict(seg)
+                if "vehicle_id" in seg_copy:
+                    seg_copy["vehicle_id"] = normalize_profile_id(seg_copy.get("vehicle_id"))
+                segments_data.append(seg_copy)
             action_chains_data = [
                 seg.get("action_chain", []) for seg in segments_data
             ]
@@ -1648,14 +2144,17 @@ class MainWindow(QtWidgets.QMainWindow):
         time_motion_steps = [s for s in sequence if not isinstance(s[0], str)]
         enc_move_steps = [s for s in sequence if isinstance(s[0], str) and s[0] == "enc_move"]
         enc_rot_steps = [s for s in sequence if isinstance(s[0], str) and s[0] == "enc_rot"]
-        motion_count = len(time_motion_steps) + len(enc_move_steps) + len(enc_rot_steps)
+        traj_steps = [s for s in sequence if isinstance(s[0], str) and s[0] == "traj_v"]
+        motion_count = len(time_motion_steps) + len(enc_move_steps) + len(enc_rot_steps) + len(traj_steps)
         nonzero_omega = (
             sum(1 for d, vx, vy, w in time_motion_steps if w != 0)
             + len(enc_rot_steps)
+            + sum(1 for s in traj_steps if s[4] != 0)
         )
         max_abs_omega = max(
             [abs(w) for d, vx, vy, w in time_motion_steps]
-            + [abs(s[3]) for s in enc_rot_steps],
+            + [abs(s[3]) for s in enc_rot_steps]
+            + [abs(s[4]) for s in traj_steps],
             default=0,
         )
         action_steps = len(sequence) - motion_count
@@ -1694,8 +2193,8 @@ class MainWindow(QtWidgets.QMainWindow):
             "当前补偿设置：\n  " + flags_text + "\n\n"
             + "导出序列：%d 步（运动 %d + 动作 %d）\n" % (
                 len(sequence), motion_count, action_steps)
-            + "其中编码器移动: %d，编码器旋转: %d，旋转步: %d（最大 |w|=%d）\n\n" % (
-                len(enc_move_steps), len(enc_rot_steps), nonzero_omega, max_abs_omega)
+            + "其中连续轨迹: %d，编码器移动: %d，编码器旋转: %d，旋转步: %d（最大 |w|=%d）\n\n" % (
+                len(traj_steps), len(enc_move_steps), len(enc_rot_steps), nonzero_omega, max_abs_omega)
             + "前 8 步预览：\n" + preview + "\n\n"
             + "确认后写入 %s（自动 .bak 备份）" % self._current_profile().file_path.name
         )

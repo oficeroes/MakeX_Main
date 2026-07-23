@@ -9,7 +9,7 @@
 
 ## 第 1 步：创建机器人源文件
 
-新建 `diff2_forward.py`（参照 `mecanum_X_forward.py`），必须包含：
+新建 `diff2_forward.py`（参照 `mecanum_drive.py` 或 `mecanum_forward.py`），必须包含：
 
 ### 1a. AUTO_RAMP_MS 常量（exporter 会就地更新这行）
 
@@ -83,7 +83,7 @@ DIFF2_PROFILE = ChassisProfile(
     description="左轮 + 右轮，纯前进/后退/自转。横移 Vx 在此底盘无效。",
 )
 
-CHASSIS_PROFILES = [OMNI3_PROFILE, MECANUM_X_PROFILE, DIFF2_PROFILE]  # 追加到末尾
+CHASSIS_PROFILES = [OMNI3_PROFILE, MECANUM_4W_PROFILE, DIFF2_PROFILE]  # 追加到末尾
 ```
 
 **就这两处**，GUI 重启后下拉框会自动出现新底盘。
@@ -137,7 +137,7 @@ kinematics 会生成含 Vx 的元组，但机器人侧 `diff2_kinematics` 中 Vx
 
 ### schema_version
 每次 JSON 格式发生不兼容变化时，在 `config.py` 里递增 `SCHEMA_VERSION`。
-当前版本：`4`（v4 新增 `chassis_profile_id`）。
+当前版本：`6`（v6 新增 `profile_params`，每个底盘单独保存标定和运动参数）。
 
 ### 旧 JSON 兼容
 `_apply_payload` 里对所有字段都用 `.get(key, default)` 读取，
@@ -154,5 +154,4 @@ AUTO_SEQUENCE 的 `(duration, Vx, Vy, omega)` 格式与底盘无关。
 | profile_id | display_name | 文件 | 轮数 | face 概念 |
 |------------|--------------|------|------|-----------|
 | `omni3` | 三轮全向（120° 对称）| `mecanum_forward.py` | 3 | ✓ |
-| `mecanum_x` | X 型麦克纳姆（4 轮）| `mecanum_X_forward.py` | 4 | ✗ |
-| `mecanum_drive` | 麦克纳姆竞赛车（含收球/滚球）| `mecanum_drive.py` | 4 | ✗ |
+| `mecanum_4w` | 四轮麦克纳姆（含收球 / 滚球）| `mecanum_drive.py` | 4 | ✗ |

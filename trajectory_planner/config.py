@@ -26,7 +26,7 @@ GUI 不需要改运动学代码，只需要根据当前选中的 profile 路由�
 ChassisProfile 注册表
 =====================
   OMNI3_PROFILE    三轮全向（mecanum_forward.py），has_face_concept=True
-  MECANUM_X_PROFILE  X 型麦克纳姆（mecanum_X_forward.py），has_face_concept=False
+  MECANUM_4W_PROFILE  四轮麦克纳姆（mecanum_drive.py），has_face_concept=False
   CHASSIS_PROFILES   有序列表，GUI combo_chassis 按此顺序填充
   DEFAULT_PROFILE_ID 默认选中的 profile_id（= "omni3"）
 
@@ -48,8 +48,8 @@ DEFAULT_FIELD_WIDTH_CM = 465.5
 DEFAULT_FIELD_HEIGHT_CM = 305.5
 
 # ===== 机器人物理参数 =====
-ROBOT_LENGTH_CM = 49.0            # 小车前后长度（cm）
-ROBOT_WIDTH_CM = 50.0             # 小车左右宽度（cm）
+ROBOT_LENGTH_CM = 49.0            # 默认小车前后长度（cm）
+ROBOT_WIDTH_CM = 50.0             # 默认小车左右宽度（cm）
 WHEEL_DIAMETER_CM = 10.0          # 轮子直径（cm）
 WHEEL_CIRCUMFERENCE_CM = 31.4159  # π × 10cm，轮子转一圈走的距离
 ENCODER_PPR = None                # 编码器每转脉冲数（待标定，填了才启用闭环）
@@ -99,6 +99,7 @@ BASE_ROT_DEG_PER_SEC = PROFILE_ROT_SPEED
 
 # ===== 速度标定默认值 =====
 DEFAULT_CM_PER_SEC_AT_P50 = 30.0      # 功率=50 时机器人实测沿轴速度（cm/s），待标定
+DEFAULT_STRAFE_CM_PER_SEC_AT_P50 = 30.0  # 功率=50 时机器人实测横移速度（cm/s），四轮曲线用
 DEFAULT_DEG_PER_SEC_AT_OMEGA50 = 90.0 # 功率=50 时机器人实测自转角速度（°/s），待标定
 DEFAULT_AUTO_POWER = 85                # 平移功率默认值
 DEFAULT_OMEGA_POWER = 70               # 旋转功率默认值
@@ -128,8 +129,12 @@ DEFAULT_RAMP_STEPS = 5         # 加速 / 减速各切成多少个子步骤（�
 DEFAULT_RAMP_MIN_RATIO = 0.15  # 起始 / 结束功率比例（0.15 = 15%，克服静摩擦最低值）
 RAMP_ENABLED = False           # 是否启用缓升缓降（导出时生效）
 
+# ===== 连续轨迹播放参数（四轮曲线止血版） =====
+DEFAULT_TRAJ_SAMPLE_DT = 0.05   # 每个速度采样保持时长（秒），0.05=20Hz 轨迹点
+CENTER_SAFETY_MARGIN_CM = 0.0   # 中心点额外安全边距；先按真实车身半尺寸，不额外膨胀
+
 # ===== 数据结构版本 =====
-SCHEMA_VERSION = 5  # v5: + field size controls and encoder distance scale
+SCHEMA_VERSION = 6  # v6: per-chassis calibration/settings panels
 
 # ===== 机器人执行端参数（导出时写入机器人代码顶部）=====
 DEFAULT_INVERT_X = False       # True = 所有 Vx 取反（左右装反）
@@ -165,7 +170,8 @@ class ChassisProfile:
 
     def __init__(self, profile_id, display_name, file_name, wheel_count,
                  has_face_concept=False, description="", color="#2878D0",
-                 supports_oscillate=False):
+                 supports_oscillate=False,
+                 robot_length_cm=ROBOT_LENGTH_CM, robot_width_cm=ROBOT_WIDTH_CM):
         self.profile_id = profile_id
         self.display_name = display_name
         self.file_name = file_name
@@ -176,6 +182,9 @@ class ChassisProfile:
         self.color = color
         # 四轮专用功能开关
         self.supports_oscillate = supports_oscillate
+        # 机器人外形尺寸，用于中心点禁入区
+        self.robot_length_cm = float(robot_length_cm)
+        self.robot_width_cm = float(robot_width_cm)
 
     @property
     def file_path(self):
@@ -206,6 +215,8 @@ MECANUM_4W_PROFILE = ChassisProfile(
     wheel_count=4,
     has_face_concept=False,
     supports_oscillate=True,
+    robot_length_cm=50.0,
+    robot_width_cm=48.0,
     color="#2E7D32",   # 绿色
     description=(
         "X 型麦克纳姆底盘（M1–M4）+ M5 滚球电机 + DC1/DC2 收球电机。"
@@ -218,9 +229,20 @@ CHASSIS_PROFILES = [OMNI3_PROFILE, MECANUM_4W_PROFILE]
 # 默认选中第一个
 DEFAULT_PROFILE_ID = OMNI3_PROFILE.profile_id
 
+# 旧 JSON 兼容：早期四轮底盘曾使用过这些 ID
+PROFILE_ID_ALIASES = {
+    "mecanum_x": MECANUM_4W_PROFILE.profile_id,
+    "mecanum_drive": MECANUM_4W_PROFILE.profile_id,
+}
+
+
+def normalize_profile_id(profile_id):
+    return PROFILE_ID_ALIASES.get(profile_id, profile_id)
+
 
 def get_profile(profile_id):
     """根据 ID 查找 profile；找不到时返回默认"""
+    profile_id = normalize_profile_id(profile_id)
     for p in CHASSIS_PROFILES:
         if p.profile_id == profile_id:
             return p

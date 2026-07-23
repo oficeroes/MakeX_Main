@@ -3,12 +3,12 @@
 目的
 ====
 把绘制会话（场地参数、标定值、设置、原始点、平滑后点、障碍物）序列化为 JSON，
-并保证每次保存自动产生新文件编号（trajectory_001.json → trajectory_002.json …）。
+未命名轨迹首次保存时自动产生新文件编号（trajectory_001.json → trajectory_002.json …）。
 
-文件格式（schema_version 4）
+文件格式（schema_version 6）
 ============================
 {
-  "schema_version": 4,
+  "schema_version": 6,
   "created_at": "2026-06-27T14:32:11",
   "field": {"width_cm": 300, "height_cm": 300},
   "calibration": {
@@ -29,6 +29,10 @@
     "ramp_ms": 100,
     "chassis_profile_id": "omni3"
   },
+  "profile_params": {
+    "omni3": {"calibration": {...}, "settings": {...}},
+    "mecanum_4w": {"calibration": {...}, "settings": {...}}
+  },
   "path": {
     "raw_points_cm":      [[x, y], ...],
     "smoothed_points_cm": [[x, y], ...]
@@ -42,6 +46,7 @@
 ====
 - schema_version 在 config.SCHEMA_VERSION 中维护；每次增字段时递增。
 - chassis_profile_id 在 settings 下（v4 新增），导入时缺省 → "omni3"。
+- profile_params 在 v6 新增，用于按底盘分别保存标定和运动参数。
 - load_trajectory 不做版本迁移，老文件字段缺失时依赖调用方的 .get(key, default)。
 
 API
@@ -83,12 +88,14 @@ def next_filename(folder=TRAJECTORIES_DIR):
 def build_payload(field_w, field_h, calibration, settings,
                   raw_points, smoothed_points, obstacles,
                   path_segments=None, action_chains=None,
-                  segment_vehicle_ids=None):
+                  segment_vehicle_ids=None, profile_params=None,
+                  segment_curves=None):
     """组装要存盘的数据结构
 
     path_segments:        list of (raw_points, smoothed_points) tuples
     action_chains:        list of list of dicts
     segment_vehicle_ids:  list of str — 每段对应的 profile_id
+    segment_curves:       list of dict — 每段的绘制类型 + 锚点（可选）
     """
     if path_segments is None:
         path_segments = [(raw_points, smoothed_points)]
@@ -96,15 +103,21 @@ def build_payload(field_w, field_h, calibration, settings,
         action_chains = [[] for _ in path_segments]
     if segment_vehicle_ids is None:
         segment_vehicle_ids = ["" for _ in path_segments]
+    if segment_curves is None:
+        segment_curves = [{} for _ in path_segments]
 
     segments_data = []
-    for (raw, smooth), blocks, vid in zip(path_segments, action_chains, segment_vehicle_ids):
-        segments_data.append({
+    for (raw, smooth), blocks, vid, curve in zip(
+            path_segments, action_chains, segment_vehicle_ids, segment_curves):
+        seg_dict = {
             "vehicle_id": vid,
             "raw_points_cm": [[float(x), float(y)] for x, y in raw],
             "smoothed_points_cm": [[float(x), float(y)] for x, y in smooth],
             "action_chain": [dict(b) for b in blocks],
-        })
+        }
+        if curve:
+            seg_dict.update(curve)
+        segments_data.append(seg_dict)
 
     payload = {
         "schema_version": SCHEMA_VERSION,
@@ -112,6 +125,7 @@ def build_payload(field_w, field_h, calibration, settings,
         "field": {"width_cm": float(field_w), "height_cm": float(field_h)},
         "calibration": dict(calibration),
         "settings": dict(settings),
+        "profile_params": dict(profile_params or {}),
         "segments": segments_data,
         "obstacles": [dict(o) for o in obstacles],
     }

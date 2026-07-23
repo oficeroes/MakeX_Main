@@ -1,0 +1,1236 @@
+<!DOCTYPE html>
+<html lang="en-us" dir="ltr">
+<head>
+  <meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<meta name="description" content="Tuning # For Road Runner to work best, it needs to be tuned to your robot. This process involves running several op modes and adjusting a set of parameters that capture the behavior of the bot. The entire affair shouldn&rsquo;t take more than a few hours, and it can go much faster once you know the ropes.
+Read this page very carefully, especially if it&rsquo;s your first time. Most details are only mentioned once and you don&rsquo;t want to miss them.">
+<meta name="theme-color" media="(prefers-color-scheme: light)" content="#ffffff">
+<meta name="theme-color" media="(prefers-color-scheme: dark)" content="#343a40">
+<meta name="color-scheme" content="light dark"><meta property="og:title" content="Tuning" />
+<meta property="og:description" content="Tuning # For Road Runner to work best, it needs to be tuned to your robot. This process involves running several op modes and adjusting a set of parameters that capture the behavior of the bot. The entire affair shouldn&rsquo;t take more than a few hours, and it can go much faster once you know the ropes.
+Read this page very carefully, especially if it&rsquo;s your first time. Most details are only mentioned once and you don&rsquo;t want to miss them." />
+<meta property="og:type" content="article" />
+<meta property="og:url" content="https://rr.brott.dev/docs/v1-0/tuning/" /><meta property="article:section" content="docs" />
+
+
+<title>Tuning | Road Runner Docs</title>
+<link rel="manifest" href="/manifest.json">
+<link rel="icon" href="/favicon.png" >
+<link rel="stylesheet" href="/book.min.33a48f5432973b8ff9a82679d9e45d67f2c15d4399bd2829269455cfe390b5e8.css" integrity="sha256-M6SPVDKXO4/5qCZ52eRdZ/LBXUOZvSgpJpRVz&#43;OQteg=" crossorigin="anonymous">
+  <script defer src="/flexsearch.min.js"></script>
+  <script defer src="/en.search.min.0840d20475935a3cf079c619f3818b553a49b7702c58fbd51c4fc65af7e56fe1.js" integrity="sha256-CEDSBHWTWjzwecYZ84GLVTpJt3AsWPvVHE/GWvflb&#43;E=" crossorigin="anonymous"></script>
+<!--
+Made with Book Theme
+https://github.com/alex-shpak/hugo-book
+-->
+  
+</head>
+<body dir="ltr">
+  <input type="checkbox" class="hidden toggle" id="menu-control" />
+  <input type="checkbox" class="hidden toggle" id="toc-control" />
+  <main class="container flex">
+    <aside class="book-menu">
+      <div class="book-menu-content">
+        
+  <nav>
+<h2 class="book-brand">
+  <a class="flex align-center" href="/"><span>Road Runner Docs</span>
+  </a>
+</h2>
+
+
+<div class="book-search">
+  <input type="text" id="book-search-input" placeholder="Search" aria-label="Search" maxlength="64" data-hotkeys="s/" />
+  <div class="book-search-spinner hidden"></div>
+  <ul id="book-search-results"></ul>
+</div>
+
+
+
+
+
+
+
+
+
+
+
+
+  
+
+
+
+  
+  <ul>
+    
+      
+        <li>
+          
+  
+  
+
+  
+    <span>1.0.x</span>
+  
+
+          
+  <ul>
+    
+      
+        <li>
+          
+  
+  
+
+  
+    <a href="/docs/v1-0/installation/" class="">Installation</a>
+  
+
+        </li>
+      
+    
+      
+        <li>
+          
+  
+  
+
+  
+    <a href="/docs/v1-0/new-features/" class="">New Features</a>
+  
+
+        </li>
+      
+    
+      
+        <li>
+          
+  
+  
+
+  
+    <a href="/docs/v1-0/migration/" class="">Migrating from 0.5.x</a>
+  
+
+        </li>
+      
+    
+      
+        <li>
+          
+  
+  
+
+  
+    <a href="/docs/v1-0/actions/" class="">Actions</a>
+  
+
+        </li>
+      
+    
+      
+        <li>
+          
+  
+  
+
+  
+    <a href="/docs/v1-0/tuning/" class="active">Tuning</a>
+  
+
+        </li>
+      
+    
+      
+        <li>
+          
+  
+  
+
+  
+    <a href="/docs/v1-0/api-docs/" class="">API Docs</a>
+  
+
+        </li>
+      
+    
+      
+        <li>
+          
+  
+  
+
+  
+    <a href="/docs/v1-0/builder-ref/" class="">Builder Reference</a>
+  
+
+        </li>
+      
+    
+      
+        <li>
+          
+  
+  
+
+  
+    <span>Guides</span>
+  
+
+          
+  <ul>
+    
+      
+        <li>
+          
+  
+  
+
+  
+    <a href="/docs/v1-0/guides/cancellation/" class="">Cancellation</a>
+  
+
+        </li>
+      
+    
+      
+        <li>
+          
+  
+  
+
+  
+    <a href="/docs/v1-0/guides/extra-correction/" class="">Extra Correction</a>
+  
+
+        </li>
+      
+    
+      
+        <li>
+          
+  
+  
+
+  
+    <a href="/docs/v1-0/guides/path-following/" class="">Path Following</a>
+  
+
+          
+  <ul>
+    
+  </ul>
+
+        </li>
+      
+    
+      
+        <li>
+          
+  
+  
+
+  
+    <a href="/docs/v1-0/guides/pose-mapping/" class="">Pose Mapping</a>
+  
+
+          
+  <ul>
+    
+  </ul>
+
+        </li>
+      
+    
+      
+        <li>
+          
+  
+  
+
+  
+    <a href="/docs/v1-0/guides/teleop-actions/" class="">Teleop Actions</a>
+  
+
+        </li>
+      
+    
+      
+        <li>
+          
+  
+  
+
+  
+    <a href="/docs/v1-0/guides/variable-constraints/" class="">Variable Constraints</a>
+  
+
+          
+  <ul>
+    
+  </ul>
+
+        </li>
+      
+    
+      
+        <li>
+          
+  
+  
+
+  
+    <a href="/docs/v1-0/guides/centerstage-auto/" class="">Building a CENTERSTAGE Autonomous</a>
+  
+
+        </li>
+      
+    
+      
+        <li>
+          
+  
+  
+
+  
+    <a href="/docs/v1-0/guides/continuity/" class="">Continuity</a>
+  
+
+          
+  <ul>
+    
+  </ul>
+
+        </li>
+      
+    
+      
+        <li>
+          
+  
+  
+
+  
+    <a href="/docs/v1-0/guides/ftclib-commands/" class="">FTCLib Commands</a>
+  
+
+        </li>
+      
+    
+      
+        <li>
+          
+  
+  
+
+  
+    <a href="/docs/v1-0/guides/tangents/" class="">Tangents</a>
+  
+
+          
+  <ul>
+    
+  </ul>
+
+        </li>
+      
+    
+  </ul>
+
+        </li>
+      
+    
+      
+        <li>
+          
+  
+  
+
+  
+    <a href="/docs/v1-0/log-files/" class="">Log Files</a>
+  
+
+        </li>
+      
+    
+      
+        <li>
+          
+  
+  
+
+  
+    <a href="/docs/v1-0/modules/" class="">Modules</a>
+  
+
+        </li>
+      
+    
+  </ul>
+
+        </li>
+      
+    
+      
+        <li>
+          
+  
+  
+
+  
+    <span>0.5.x</span>
+  
+
+          
+  <ul>
+    
+      
+        <li>
+          
+  
+  
+
+  
+    <a href="/docs/v0-5/installation/" class="">Installation</a>
+  
+
+        </li>
+      
+    
+      
+        <li>
+          
+  
+  
+
+  
+    <a href="/docs/v0-5/kdoc/" class="">KDoc</a>
+  
+
+        </li>
+      
+    
+      
+        <li>
+          
+  
+  
+
+  
+    <a href="/docs/v0-5/javadoc/" class="">Javadoc</a>
+  
+
+        </li>
+      
+    
+      
+        <li>
+          
+  
+  
+
+  
+    <span>Tour</span>
+  
+
+          
+  <ul>
+    
+      
+        <li>
+          
+  
+  
+
+  
+    <a href="/docs/v0-5/tour/introduction/" class="">Introduction</a>
+  
+
+        </li>
+      
+    
+      
+        <li>
+          
+  
+  
+
+  
+    <a href="/docs/v0-5/tour/pid-control/" class="">PID Control</a>
+  
+
+        </li>
+      
+    
+      
+        <li>
+          
+  
+  
+
+  
+    <a href="/docs/v0-5/tour/feedforward-control/" class="">Feedforward Control</a>
+  
+
+        </li>
+      
+    
+      
+        <li>
+          
+  
+  
+
+  
+    <a href="/docs/v0-5/tour/motion-profiling/" class="">Motion Profiling</a>
+  
+
+        </li>
+      
+    
+      
+        <li>
+          
+  
+  
+
+  
+    <a href="/docs/v0-5/tour/coordinate-frame/" class="">Coordinate Frames</a>
+  
+
+        </li>
+      
+    
+      
+        <li>
+          
+  
+  
+
+  
+    <a href="/docs/v0-5/tour/parametric-paths/" class="">Parametric Paths</a>
+  
+
+        </li>
+      
+    
+      
+        <li>
+          
+  
+  
+
+  
+    <a href="/docs/v0-5/tour/trajectories/" class="">Trajectories</a>
+  
+
+        </li>
+      
+    
+      
+        <li>
+          
+  
+  
+
+  
+    <a href="/docs/v0-5/tour/kinematics/" class="">Kinematics</a>
+  
+
+        </li>
+      
+    
+  </ul>
+
+        </li>
+      
+    
+      
+        <li>
+          
+  
+  
+
+  
+    <span>Quickstart</span>
+  
+
+          
+  <ul>
+    
+      
+        <li>
+          
+  
+  
+
+  
+    <a href="/docs/v0-5/quickstart/introduction/" class="">Introduction</a>
+  
+
+        </li>
+      
+    
+      
+        <li>
+          
+  
+  
+
+  
+    <a href="/docs/v0-5/quickstart/tuning/" class="">Tuning</a>
+  
+
+        </li>
+      
+    
+      
+        <li>
+          
+  
+  
+
+  
+    <a href="/docs/v0-5/quickstart/faq/" class="">FAQ</a>
+  
+
+        </li>
+      
+    
+  </ul>
+
+        </li>
+      
+    
+  </ul>
+
+        </li>
+      
+    
+      
+        <li>
+          
+  
+  
+
+  
+    <a href="/docs/resources/" class="">Resources</a>
+  
+
+        </li>
+      
+    
+      
+        <li>
+          
+  
+  
+
+  
+    <a href="/docs/meepmeep/" class="">MeepMeep Visualizer</a>
+  
+
+        </li>
+      
+    
+  </ul>
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+</nav>
+
+
+
+
+  <script>(function(){var e=document.querySelector("aside .book-menu-content");addEventListener("beforeunload",function(){localStorage.setItem("menu.scrollTop",e.scrollTop)}),e.scrollTop=localStorage.getItem("menu.scrollTop")})()</script>
+
+
+ 
+      </div>
+    </aside>
+
+    <div class="book-page">
+      <header class="book-header">
+        
+  <div class="flex align-center justify-between">
+  <label for="menu-control">
+    <img src="/svg/menu.svg" class="book-icon" alt="Menu" />
+  </label>
+
+  <strong>Tuning</strong>
+
+  <label for="toc-control">
+    
+    <img src="/svg/toc.svg" class="book-icon" alt="Table of Contents" />
+    
+  </label>
+</div>
+
+
+  
+  <aside class="hidden clearfix">
+    
+  
+<nav id="TableOfContents">
+  <ul>
+    <li><a href="#getting-help">Getting Help</a></li>
+    <li><a href="#drive-classes">Drive Classes</a></li>
+    <li><a href="#ftc-dashboard">FTC Dashboard</a></li>
+    <li><a href="#forwardpushtest"><code>ForwardPushTest</code></a></li>
+    <li><a href="#lateralpushtest-mecanum-with-drive-encoders-only"><code>LateralPushTest</code> (mecanum with drive encoders only)</a></li>
+    <li><a href="#forwardramplogger-dead-wheels-only"><code>ForwardRampLogger</code> (dead wheels only)</a></li>
+    <li><a href="#lateralramplogger-mecanum-with-dead-wheels-only"><code>LateralRampLogger</code> (mecanum with dead wheels only)</a></li>
+    <li><a href="#angularramplogger"><code>AngularRampLogger</code></a>
+      <ul>
+        <li><a href="#drive-encoders">Drive Encoders</a></li>
+        <li><a href="#dead-wheels">Dead Wheels</a></li>
+      </ul>
+    </li>
+    <li><a href="#manualfeedforwardtuner"><code>ManualFeedforwardTuner</code></a></li>
+    <li><a href="#manualfeedbacktuner"><code>ManualFeedbackTuner</code></a></li>
+    <li><a href="#splinetest"><code>SplineTest</code></a></li>
+    <li><a href="#otos-exclusive-tuners">OTOS-Exclusive Tuners</a>
+      <ul>
+        <li><a href="#otosangularscalartuner"><code>OTOSAngularScalarTuner</code></a></li>
+        <li><a href="#otoslinearscalartuner"><code>OTOSLinearScalarTuner</code></a></li>
+        <li><a href="#otosheadingoffsettuner"><code>OTOSHeadingOffsetTuner</code></a></li>
+        <li><a href="#otospositionoffsettuner"><code>OTOSPositionOffsetTuner</code></a></li>
+      </ul>
+    </li>
+  </ul>
+</nav>
+
+
+
+  </aside>
+  
+ 
+      </header>
+
+      
+      
+  <article class="markdown"><h1 id="tuning">
+  Tuning
+  <a class="anchor" href="#tuning">#</a>
+</h1>
+<p>For Road Runner to work best, it needs to be tuned to your robot. This process
+involves running several op modes and adjusting a set of parameters that capture
+the behavior of the bot. The entire affair shouldn&rsquo;t take more than a few hours,
+and it can go much faster once you know the ropes.</p>
+<p><strong>Read this page very carefully</strong>, especially if it&rsquo;s your first time. Most details
+are only mentioned once and you don&rsquo;t want to miss them. Failing to fully
+complete one step in the sequence will often affect the next step, and you may
+be forced to start over when you don&rsquo;t get satisfactory results at the end.</p>
+<p>There are also some steps that only apply to mecanum drives or vary depending on
+whether you&rsquo;re using drive encoders or dead wheels for localization. Pay
+attention to these directives and only complete the steps you need.</p>
+<p>Once you&rsquo;ve finished tuning properly, your robot should be able to execute
+pretty much any path you can specify. The shape of the path and the battery
+voltage shouldn&rsquo;t significantly affect following. But the tuning can easily
+become out of date if weight is added or removed from the robot, encoders/motors
+are changed, or other major modifications are made. You may find yourself
+retuning the robot several times during the season, and it may help to practice
+the motions well before competition.</p>
+<p>Make sure you have <a href="../installation">downloaded a quickstart project</a> and opened
+it in Android Studio. Basic familiarity with FTC programming in Android Studio
+will help immensely. Consider reading through <a href="https://github.com/alan412/LearnJavaForFTC/blob/master/LearnJavaForFTC.pdf">Learn Java for
+FTC</a>
+and writing some of your own op modes before continuing.</p>
+<h2 id="getting-help">
+  Getting Help
+  <a class="anchor" href="#getting-help">#</a>
+</h2>
+<p>Try asking the community over on the <a href="https://discord.com/invite/ftc">FTC Discord</a>.
+Many people over there have gone through the tuning process and can give the most
+practical advice for you and your team.</p>
+<p>Make sure you&rsquo;re running the <a href="https://github.com/acmerobotics/road-runner-ftc/tags">latest version</a>
+of the library. You can check and update the library version in the <code>TeamCode/build.gradle</code> file
+on the line that looks like <code>implementation &quot;com.acmerobotics.roadrunner:ftc:LIBRARY_VERSION_HERE&quot;</code>.</p>
+<p>If all else fails, open an issue <a href="https://github.com/acmerobotics/road-runner-quickstart/issues">here</a>
+with as much information as you can supply:</p>
+<ul>
+<li>Tuning files (click the &ldquo;Download&rdquo; button on any tuning page)</li>
+<li>Link to robot code (GitHub repository or something)
+<ul>
+<li>Version of the library you&rsquo;re using.</li>
+</ul>
+</li>
+<li>Robot logs (download from <code>http://192.168.43.1:8080/logs</code>)</li>
+</ul>
+<!-- raw HTML omitted -->
+<!-- raw HTML omitted -->
+<h2 id="drive-classes">
+  Drive Classes
+  <a class="anchor" href="#drive-classes">#</a>
+</h2>
+<p><strong>Goal: get basic hardware configured</strong></p>
+<p>Open either <code>MecanumDrive</code> or <code>TankDrive</code> depending on your bot.</p>
+<ul>
+<li><code>MecanumDrive</code>: The class assumes your four wheel motors are named
+<code>&quot;leftFront&quot;</code>, <code>&quot;leftBack&quot;</code>, <code>&quot;rightBack&quot;</code>, and <code>&quot;rightFront&quot;</code> and your IMU is
+named <code>&quot;imu&quot;</code>.</li>
+<li><code>TankDrive</code>: The class stores the left and right motors in <code>leftMotors</code> and
+<code>rightMotors</code>, respectively. To start, the class puts motors named <code>&quot;left&quot;</code>
+and <code>&quot;right&quot;</code> in the appropriate lists. If you have more motors, add them to
+the <code>Arrays.asList(...)</code> expression.</li>
+</ul>
+<p>Set the logo and USB direction of your IMU using the instructions on <a href="https://ftc-docs.firstinspires.org/en/latest/programming_resources/imu/imu.html?highlight=imu#physical-hub-mounting">this page</a>.</p>
+<p>Feel free to change the default hardware names to match you robot configuration.
+For more information, check out the <a href="https://ftc-docs.firstinspires.org/en/latest/hardware_and_software_configuration/configuring/index.html">FTC docs</a>.</p>
+<p>In <code>TuningOpModes</code>, set the <code>DRIVE_CLASS</code> variable to the drive class you&rsquo;re
+using.</p>
+<p>Then specify how the robot should track its position. There are a few built-in
+localizers:</p>
+<ul>
+<li><strong>Drive encoders</strong>: This is the default. The IMU will also be used on mecanum to
+get better heading.</li>
+<li><strong>Two (dead) wheel</strong>: Change the right-hand-side of <code>localizer = </code> 
+(<a href="https://github.com/acmerobotics/road-runner-quickstart/blob/5f35f4c22c1ae7c0be5b35da0961c8f3a181ad31/TeamCode/src/main/java/org/firstinspires/ftc/teamcode/MecanumDrive.java#L240">mecanum</a>,
+<a href="https://github.com/acmerobotics/road-runner-quickstart/blob/5f35f4c22c1ae7c0be5b35da0961c8f3a181ad31/TeamCode/src/main/java/org/firstinspires/ftc/teamcode/TankDrive.java#L247">tank</a>)
+to <code>new TwoDeadWheelLocalizer(hardwareMap, lazyImu.get(), PARAMS.inPerTick, pose)</code>. The code expects the parallel, forward-pointing encoder to be named
+<code>&quot;par&quot;</code> and the perpendicular one to be named <code>&quot;perp&quot;</code>.</li>
+<li><strong>Three (dead) wheel</strong>: Change the right-hand-side of <code>localizer = </code> 
+(<a href="https://github.com/acmerobotics/road-runner-quickstart/blob/5f35f4c22c1ae7c0be5b35da0961c8f3a181ad31/TeamCode/src/main/java/org/firstinspires/ftc/teamcode/MecanumDrive.java#L240">mecanum</a>,
+<a href="https://github.com/acmerobotics/road-runner-quickstart/blob/5f35f4c22c1ae7c0be5b35da0961c8f3a181ad31/TeamCode/src/main/java/org/firstinspires/ftc/teamcode/TankDrive.java#L247">tank</a>)
+to <code>new ThreeDeadWheelLocalizer(hardwareMap, PARAMS.inPerTick, pose)</code>. The
+code expects the two parallel encoders to be named <code>&quot;par0&quot;</code> and <code>&quot;par1&quot;</code> and
+the perpendicular one to be named <code>&quot;perp&quot;</code>.</li>
+<li><strong>Pinpoint Odometry Computer</strong>: Change the right-hand-side of <code>localizer = </code> 
+(<a href="https://github.com/acmerobotics/road-runner-quickstart/blob/5f35f4c22c1ae7c0be5b35da0961c8f3a181ad31/TeamCode/src/main/java/org/firstinspires/ftc/teamcode/MecanumDrive.java#L240">mecanum</a>,
+<a href="https://github.com/acmerobotics/road-runner-quickstart/blob/5f35f4c22c1ae7c0be5b35da0961c8f3a181ad31/TeamCode/src/main/java/org/firstinspires/ftc/teamcode/TankDrive.java#L247">tank</a>)
+to <code>new PinpointLocalizer(hardwareMap, PARAMS.inPerTick, pose)</code>. The code
+expects a Pinpoint device to be configured with name <code>&quot;pinpoint&quot;</code>. <strong>Tuning
+for a Pinpoint device is the same as tuning for two dead wheels.</strong></li>
+<li><strong>SparkFun Optical Odometry Tracking Sensor (OTOS)</strong>: Change the right-hand-side
+of <code>localizer = </code> 
+(<a href="https://github.com/acmerobotics/road-runner-quickstart/blob/5f35f4c22c1ae7c0be5b35da0961c8f3a181ad31/TeamCode/src/main/java/org/firstinspires/ftc/teamcode/MecanumDrive.java#L240">mecanum</a>,
+<a href="https://github.com/acmerobotics/road-runner-quickstart/blob/5f35f4c22c1ae7c0be5b35da0961c8f3a181ad31/TeamCode/src/main/java/org/firstinspires/ftc/teamcode/TankDrive.java#L247">tank</a>)
+to <code>new OTOSLocalizer(hardwareMap, pose)</code>.
+The code expects the OTOS device to be configured with name <code>&quot;sensor_otos&quot;</code>.
+You can also set  your <code>inPerTick</code> parameter in your drive class to <code>1.0</code>,
+as the OTOS itself reports values in inches.
+The OTOS localizer also has four extra tuning OpModes described at the end of this guide,
+which should be done <em>before</em> tuning the rest of the robot.
+After those are done, <strong>the OTOS localizer can be tuned like the two dead wheel localizer</strong>,
+but without the odometry wheel locations from <code>AngularRampLogger</code>.</li>
+</ul>
+<blockquote class="book-hint ">
+  <p>If you choose to use dead wheels, drive encoders are not needed, and those
+encoder ports can be used for dead wheel encoders. You can change the names in
+<code>TwoDeadWheelLocalizer</code>/<code>ThreeDeadWheelLocalizer</code> to reflect the motor names of
+the slots the encoders were connected to.</p>
+<p>Note that, for <a href="https://blog.eeshwark.com/robotblog/rev-hub-quadrature">technical
+reasons</a>, ports 0 and 3
+on REV hubs are more accurate at high speeds and should be used for the parallel
+dead wheels.</p>
+
+</blockquote>
+
+<blockquote class="book-hint ">
+  Check out
+<a href="https://gm0.org/en/latest/docs/common-mechanisms/dead-wheels.html">gm0</a> for
+more details on dead wheels, including advice on mechanical design.
+</blockquote>
+
+<p>Now check that the motors spin in the right direction. Positive power on all
+wheels should move the robot forward. And if you&rsquo;re using drive encoders, the
+ticks recorded should increase in a positive direction.</p>
+<p>Those with mecanum drives should use <code>MecanumDirectionDebugger</code> to make sure
+all the directions are correct. The op mode uses the following button mappings:</p>
+<pre tabindex="0"><code>/**
+ * Xbox/PS4 Button - Motor
+ *   X / ▢         - Front Left
+ *   Y / Δ         - Front Right
+ *   B / O         - Rear  Right
+ *   A / X         - Rear  Left
+ *                                    The buttons are mapped to match the wheels spatially if you
+ *                                    were to rotate the gamepad 45deg°. x/square is the front left
+ *                    ________        and each button corresponds to the wheel as you go clockwise
+ *                   / ______ \
+ *     ------------.-&#39;   _  &#39;-..+              Front of Bot
+ *              /   _  ( Y )  _  \                  ^
+ *             |  ( X )  _  ( B ) |     Front Left   \    Front Right
+ *        ___  &#39;.      ( A )     /|       Wheel       \      Wheel
+ *      .&#39;    &#39;.    &#39;-._____.-&#39;  .&#39;       (x/▢)        \     (Y/Δ)
+ *     |       |                 |                      \
+ *      &#39;.___.&#39; &#39;.               |          Rear Left    \   Rear Right
+ *               &#39;.             /             Wheel       \    Wheel
+ *                \.          .&#39;              (A/X)        \   (B/O)
+ *                  \________/
+ */
+</code></pre><p>Reverse any motors running in the wrong direction with <code>setDirection(...)</code>,
+and do the same for corresponding drive encoders as well.</p>
+<p>If you&rsquo;re using dead wheels, run <code>DeadWheelDirectionDebugger</code> and reverse those
+encoders accordingly.</p>
+<blockquote class="book-hint warning">
+  The direction of each <code>Encoder</code> is <strong>independent of the <code>DcMotorEx</code> it&rsquo;s
+created with</strong>. Changing the direction of an <code>Encoder</code> has no effect on the
+direction of its associated <code>DcMotorEx</code> (and vice versa).
+</blockquote>
+
+<p>Each of these items has a <code>TODO</code> comment in the code. These comments are
+highlighted, and you can see a list of all of them in the <a href="https://www.jetbrains.com/help/idea/using-todo.html">TODO tool
+window</a> at the bottom of
+Android Studio. It may help to delete the comments as you complete them to keep
+track of your progress.</p>
+<h2 id="ftc-dashboard">
+  FTC Dashboard
+  <a class="anchor" href="#ftc-dashboard">#</a>
+</h2>
+<p>Many steps require using <a href="https://acmerobotics.github.io/ftc-dashboard">FTC
+Dashboard</a>, a tool for monitoring
+and debugging FTC applications. It comes installed by default with the
+quickstart repository.</p>
+<p>Start by <a href="https://ftc-docs.firstinspires.org/en/latest/programming_resources/shared/program_and_manage_network/Connecting-a-Laptop-to-the-Program-%26-Manage-Network.html">connecting your computer to the Program &amp; Manage
+network</a>.
+Navigate to <code>http://192.168.43.1:8080/dash</code> (if you&rsquo;re using a phone as your
+Robot Controller, go to <code>http://192.168.49.1:8080/dash</code> instead). You can read
+more about the supported features in <a href="https://acmerobotics.github.io/ftc-dashboard/features">the
+docs</a>. The most important
+for tuning are config variables and live graphing.</p>
+<!-- raw HTML omitted -->
+<h2 id="forwardpushtest">
+  <code>ForwardPushTest</code>
+  <a class="anchor" href="#forwardpushtest">#</a>
+</h2>
+<p><strong>Goal: determine <code>inPerTick</code> empirically</strong></p>
+<p>Place the robot on the tiles with plenty of room in front. Square the robot up
+with the grid and make note of its starting position. Run <code>ForwardPushTest</code> and
+then slowly push the robot straight until the end of the tiles. Record the &ldquo;ticks
+traveled&rdquo; from telemetry before stopping the op mode. Without moving the robot,
+record also the forward distance traveled on the tiles in inches. Set the
+<code>inPerTick</code> variable in your drive class to the real distance traveled divided
+by the ticks traveled.</p>
+<p>Make sure the wheels don&rsquo;t slip! The motors should spin freely. If the bot is
+too light or otherwise slipping, you can use theoretical values for ticks per
+revolution, gear ratio, and wheel diameter to compute <code>inPerTick</code> instead.</p>
+<blockquote class="book-hint warning">
+  If the ticks traveled is close to zero no matter how far you push, the motors on
+one side are probably reversed. Go back to the previous step and double check
+the encoder directions.
+</blockquote>
+
+<h2 id="lateralpushtest-mecanum-with-drive-encoders-only">
+  <code>LateralPushTest</code> (mecanum with drive encoders only)
+  <a class="anchor" href="#lateralpushtest-mecanum-with-drive-encoders-only">#</a>
+</h2>
+<p><strong>Goal: determine <code>lateralInPerTick</code> empirically</strong></p>
+<p>This routine is simply a version of <code>ForwardPushTest</code> that measures leftward
+motion instead of forward motion. Set the robot up as before, slowly push it
+left, and set <code>lateralInPerTick</code> to the distance divided by ticks. The value
+you get should be positive.</p>
+<p>The measured value includes the inevitable strafing slip (previous versions
+compensated for this explicitly with <code>lateralMultiplier</code>), so you should expect
+it to be smaller than <code>laterInPerTick</code> by a modest amount.</p>
+<h2 id="forwardramplogger-dead-wheels-only">
+  <code>ForwardRampLogger</code> (dead wheels only)
+  <a class="anchor" href="#forwardramplogger-dead-wheels-only">#</a>
+</h2>
+<p><strong>Goal: determine <code>kS</code>, <code>kV</code> empirically</strong></p>
+<p>This routine slowly increases the forward power given to the robot and measures
+the forward velocity over time to calculate the static and velocity feedforward
+parameters (<code>kS</code> and <code>kV</code>, respectively). By default, the power will increase by
+0.1 each second until it reaches 0.9.</p>
+<p>Place your robot on the tiles with as much distance in front of it as possible.
+Start the op mode and press stop immediately when the robot nears the edge of
+the tile. Don&rsquo;t expect anything to be displayed in telemetry. All data collected
+is saved to a file for further analysis.</p>
+<p>Once you finish, connect your computer to the RC wireless network using <a href="http://ftc-docs.firstinspires.org/programming_resources/shared/program_and_manage_network/Connecting-a-Laptop-to-the-Program-%26-Manage-Network.html">these
+instructions</a>.</p>
+<ul>
+<li>If you have a control hub, navigate to
+<code>http://192.168.43.1:8080/tuning/forward-ramp.html</code>.</li>
+<li>If you have a RC phone, navigate to
+<code>http://192.168.49.1:8080/tuning/forward-ramp.html</code>.</li>
+</ul>
+<p>From now on, I&rsquo;ll use Control Hub URLs.</p>
+<p>You should see a page that looks like this:</p>
+<p>
+  <img src="forward-ramp.png" alt="">
+
+
+</p>
+<p>Click the &ldquo;Latest&rdquo; button, and you should see a graph appear:</p>
+<p>
+  <img src="regression0.png" alt="">
+
+
+</p>
+<p>The gray points are the measurements made by the tuner, and the red line is the
+line of best fit. Its from this line that the feedforward parameters will be
+extracted. In fact, you can see preliminary values for <code>kS</code> and <code>kV</code> already
+displayed above. But those estimates are limited by the presence of outliers.
+You can see that the red line doesn&rsquo;t quite fit the trend. Let&rsquo;s help the
+algorithm out by manually filtering out outlier points.</p>
+<p>First, click and drag to select a rectangular region of the plot:</p>
+<p>
+  <img src="regression1.png" alt="">
+
+
+</p>
+<p>Then to remove those points, press the &ldquo;e&rdquo; key or the &ldquo;exclude&rdquo; button above.
+The selection box will disappear, and the points will turn a lighter gray. After
+repeating this process as many times as necessary, you should end up with a plot
+like this:</p>
+<p>
+  <img src="regression2.png" alt="">
+
+
+</p>
+<p>Now you can copy the values above the plot into the <code>kS</code> and <code>kV</code> fields in the
+drive class.</p>
+<p>If you mess up and accidentally exclude non-outlier points, select them and
+press &ldquo;i&rdquo; or click the include button to bring them back into the calculation.</p>
+<p>If you have issues or the data looks weird, click the &ldquo;Download&rdquo; button to
+retrieve your data and include it when asking for help.</p>
+<h2 id="lateralramplogger-mecanum-with-dead-wheels-only">
+  <code>LateralRampLogger</code> (mecanum with dead wheels only)
+  <a class="anchor" href="#lateralramplogger-mecanum-with-dead-wheels-only">#</a>
+</h2>
+<p><strong>Goal: determine <code>lateralInPerTick</code> empirically</strong></p>
+<p>If all is configured correctly, the logger OpMode will move the robot to the left,
+increasing in speed as it goes (similar to <code>ForwardRampLogger</code>). Stop it at any point,
+keeping in mind that longer runs will collect more data.</p>
+<p>When you&rsquo;re done, go to <code>http://192.168.43.1:8080/tuning/lateral-ramp.html</code> and click
+the &ldquo;Latest&rdquo; button. The slope reported is <code>lateralInPerTick</code>.</p>
+<blockquote class="book-hint warning">
+  <p>A multiplicative factor alone unfortunately doesn&rsquo;t adequately capture the
+strafing behavior of most robots. It&rsquo;s common to see a plot with a plateau in
+the beginning:</p>
+<p>
+  <img src="typical-lateral-ramp-regression.jpg" alt="">
+
+
+</p>
+<p>There&rsquo;s nothing much to be done about the poor fit during tuning. Future
+versions of Road Runner may change the strafing model to get a better fit
+(progress will be tracked on <a href="https://github.com/acmerobotics/road-runner-ftc/issues/4">this
+issue</a>).</p>
+
+</blockquote>
+
+<h2 id="angularramplogger">
+  <code>AngularRampLogger</code>
+  <a class="anchor" href="#angularramplogger">#</a>
+</h2>
+<p>This routine is very similar to the last except that it rotates in place instead
+of moving forward. As before, you can change the power ramping parameters inside
+the <code>power()</code> method. Run the routine using the same instructions.</p>
+<h3 id="drive-encoders">
+  Drive Encoders
+  <a class="anchor" href="#drive-encoders">#</a>
+</h3>
+<p><strong>Goal: determine <code>trackWidthTicks</code>, <code>kS</code>, and <code>kV</code> empirically</strong></p>
+<p>Go to <code>http://192.168.43.1:8080/tuning/drive-encoder-angular-ramp.html</code> and click
+the &ldquo;Latest&rdquo; button. Use the instructions from the <code>ForwardRampLogger</code> analysis
+to get <code>kS</code>, <code>kV</code> from the the &ldquo;Ramp Regression&rdquo; plot. Then use the same
+outlier-exclusion technique on the &ldquo;Track Width Regression&rdquo; and set
+<code>trackWidthTicks</code> to the &ldquo;track width&rdquo; value when you&rsquo;re finished.</p>
+<h3 id="dead-wheels">
+  Dead Wheels
+  <a class="anchor" href="#dead-wheels">#</a>
+</h3>
+<p><strong>Goal: determine <code>trackWidthTicks</code> and odometry wheel locations empirically</strong></p>
+<p>Go to <code>http://192.168.43.1:8080/tuning/dead-wheel-angular-ramp.html</code> and click
+the &ldquo;Latest&rdquo; button. Copy the <code>kS</code> and <code>kV</code> values from <code>ForwardRampLogger</code> into
+the appropriate boxes and click the &ldquo;update&rdquo; button. Use the instructions from the
+<code>ForwardRampRegression</code> analysis to fill in <code>trackWidthTicks</code> in your
+drive class and the wheel position fields in your dead wheel class. <strong>There should
+be multiple plots. Scroll down to make sure you don&rsquo;t miss any.</strong></p>
+<blockquote class="book-hint warning">
+  To get an accurate <code>trackWidthTicks</code> value, you need accurate values for <code>kS</code>,
+<code>kV</code>.
+</blockquote>
+
+<h2 id="manualfeedforwardtuner">
+  <code>ManualFeedforwardTuner</code>
+  <a class="anchor" href="#manualfeedforwardtuner">#</a>
+</h2>
+<p><strong>Goal: Fine-tune <code>kS</code>, <code>kV</code> and add in <code>kA</code></strong></p>
+<p>This routine repeatedly drives forward and back <code>DISTANCE</code> units, giving you an
+opportunity to finalize the feedforward parameters.</p>
+<p>Open FTC Dashboard by navigating to <code>http://192.168.43.1:8080/dash</code>. Run the op
+mode, and graph <code>vref</code> against <code>v0</code>. Set <code>kA</code> to a small value like <code>0.0000001</code>
+and slowly increase it by a factor of ten until it starts effecting the plot.
+Try to make the two lines in chart as close together as possible.</p>
+<p>At this point, the robot still has no feedback and may drift over many cycles.
+Pressing Y/Δ (Xbox/PS4) will pause the tuning process and enter driver override,
+allowing you to reset the position of the bot. Pressing B/O (Xbox/PS4) will return
+to the tuning process.</p>
+<h2 id="manualfeedbacktuner">
+  <code>ManualFeedbackTuner</code>
+  <a class="anchor" href="#manualfeedbacktuner">#</a>
+</h2>
+<p><strong>Goal: Tune the feedback parameters</strong></p>
+<p>This routine also goes back and forth <code>DISTANCE</code> units but using combined
+feedforward and feedback.</p>
+<p>Use this opportunity to tune the feedforward parameters of your trajectory
+following controller.</p>
+<ul>
+<li><code>MecanumDrive</code>: There are two gains for each travel direction (forward,
+lateral, heading). The first (&ldquo;position gain&rdquo;) is like the proportional term of a
+position PID, and the second (&ldquo;velocity gain&rdquo;) is like the derivative term of
+a position PID. Here are some tips
+<ul>
+<li>Focus on tuning one parameter at a time.</li>
+<li>Start by setting a small value like <code>1</code> and adjust from there.</li>
+<li>Nudge the robot to introduce disturbances and watch them be corrected.</li>
+<li>Skip the velocity gains unless you know what you&rsquo;re doing.</li>
+</ul>
+</li>
+<li><code>TankDrive</code>: The two Ramsete gains shouldn&rsquo;t need much tuning. According to
+the <a href="https://docs.wpilib.org/en/stable/docs/software/advanced-controls/trajectories/ramsete.html">FRC
+Docs</a>,
+&ldquo;Larger values of <code>bBar</code> make convergence more aggressive like a proportional term
+whereas larger values of <code>zeta</code> provide more damping in the response.&rdquo;</li>
+</ul>
+<h2 id="splinetest">
+  <code>SplineTest</code>
+  <a class="anchor" href="#splinetest">#</a>
+</h2>
+<p>This routine follows a basic spline and validates the previous steps.</p>
+<h2 id="otos-exclusive-tuners">
+  OTOS-Exclusive Tuners
+  <a class="anchor" href="#otos-exclusive-tuners">#</a>
+</h2>
+<p><strong>Goal: Tune the OTOS device.</strong> These steps should be done before tuning the rest of the robot.</p>
+<h3 id="otosangularscalartuner">
+  <code>OTOSAngularScalarTuner</code>
+  <a class="anchor" href="#otosangularscalartuner">#</a>
+</h3>
+<p>This routine will help you determine the angular scalar for the OTOS device.
+Press start and rotate the robot 10 times (3600 degrees) in place.
+Once you are done, copy the angular scalar displayed by telemetry into
+<a href="https://github.com/acmerobotics/road-runner-quickstart/blob/d5fbfdc552358486d4d72682ae3d180313dfa588/TeamCode/src/main/java/org/firstinspires/ftc/teamcode/OTOSLocalizer.java#L18">the angular scalar parameter in OTOSLocalizer</a></p>
+<h3 id="otoslinearscalartuner">
+  <code>OTOSLinearScalarTuner</code>
+  <a class="anchor" href="#otoslinearscalartuner">#</a>
+</h3>
+<p>This routine will help you determine the linear scalar for the OTOS device.
+Press START and drive the robot forward a known distance.
+Once you are done, set
+<a href="https://github.com/acmerobotics/road-runner-quickstart/blob/d5fbfdc552358486d4d72682ae3d180313dfa588/TeamCode/src/main/java/org/firstinspires/ftc/teamcode/OTOSLocalizer.java#L19">the linear scalar parameter in OTOSLocalizer</a>
+&ldquo;Uncorrected Distance Traveled X&rdquo; value divided by the actual distance traveled.</p>
+<h3 id="otosheadingoffsettuner">
+  <code>OTOSHeadingOffsetTuner</code>
+  <a class="anchor" href="#otosheadingoffsettuner">#</a>
+</h3>
+<p>This routine will help you determine the heading offset for the OTOS device.
+Place the side of the robot against a field wall and press START, then push the robot forward a known distance.
+Once you are done, set the <code>h</code> argument to the Pose2D in
+<a href="https://github.com/acmerobotics/road-runner-quickstart/blob/d5fbfdc552358486d4d72682ae3d180313dfa588/TeamCode/src/main/java/org/firstinspires/ftc/teamcode/OTOSLocalizer.java#L22">the offset variable in OTOSLocalizer</a>
+to the displayed &ldquo;Heading Offset (radians)&rdquo; value.</p>
+<h3 id="otospositionoffsettuner">
+  <code>OTOSPositionOffsetTuner</code>
+  <a class="anchor" href="#otospositionoffsettuner">#</a>
+</h3>
+<p>This routine will help you determine the position offset for the OTOS device.
+Place the robot in the corner of two field walls and press START,
+then rotate the robot 180 degrees and push it back into the corner.
+Then copy the displayed &ldquo;X Offset&rdquo; and &ldquo;Y Offset&rdquo; values
+into the <code>x</code> and <code>y</code> arguments to
+<a href="https://github.com/acmerobotics/road-runner-quickstart/blob/d5fbfdc552358486d4d72682ae3d180313dfa588/TeamCode/src/main/java/org/firstinspires/ftc/teamcode/OTOSLocalizer.java#L22">the offset variable in OTOSLocalizer</a></p>
+</article>
+ 
+      
+
+
+      <footer class="book-footer">
+        
+  <div class="flex flex-wrap justify-between">
+
+
+
+
+
+</div>
+
+
+
+  <script>(function(){function e(e){const t=window.getSelection(),n=document.createRange();n.selectNodeContents(e),t.removeAllRanges(),t.addRange(n)}document.querySelectorAll("pre code").forEach(t=>{t.addEventListener("click",function(){if(window.getSelection().toString())return;e(t.parentElement),navigator.clipboard&&navigator.clipboard.writeText(t.parentElement.textContent)})})})()</script>
+
+
+ 
+        
+      </footer>
+
+      
+  
+  <div class="book-comments">
+
+</div>
+  
+ 
+
+      <label for="menu-control" class="hidden book-menu-overlay"></label>
+    </div>
+
+    
+    <aside class="book-toc">
+      <div class="book-toc-content">
+        
+  
+<nav id="TableOfContents">
+  <ul>
+    <li><a href="#getting-help">Getting Help</a></li>
+    <li><a href="#drive-classes">Drive Classes</a></li>
+    <li><a href="#ftc-dashboard">FTC Dashboard</a></li>
+    <li><a href="#forwardpushtest"><code>ForwardPushTest</code></a></li>
+    <li><a href="#lateralpushtest-mecanum-with-drive-encoders-only"><code>LateralPushTest</code> (mecanum with drive encoders only)</a></li>
+    <li><a href="#forwardramplogger-dead-wheels-only"><code>ForwardRampLogger</code> (dead wheels only)</a></li>
+    <li><a href="#lateralramplogger-mecanum-with-dead-wheels-only"><code>LateralRampLogger</code> (mecanum with dead wheels only)</a></li>
+    <li><a href="#angularramplogger"><code>AngularRampLogger</code></a>
+      <ul>
+        <li><a href="#drive-encoders">Drive Encoders</a></li>
+        <li><a href="#dead-wheels">Dead Wheels</a></li>
+      </ul>
+    </li>
+    <li><a href="#manualfeedforwardtuner"><code>ManualFeedforwardTuner</code></a></li>
+    <li><a href="#manualfeedbacktuner"><code>ManualFeedbackTuner</code></a></li>
+    <li><a href="#splinetest"><code>SplineTest</code></a></li>
+    <li><a href="#otos-exclusive-tuners">OTOS-Exclusive Tuners</a>
+      <ul>
+        <li><a href="#otosangularscalartuner"><code>OTOSAngularScalarTuner</code></a></li>
+        <li><a href="#otoslinearscalartuner"><code>OTOSLinearScalarTuner</code></a></li>
+        <li><a href="#otosheadingoffsettuner"><code>OTOSHeadingOffsetTuner</code></a></li>
+        <li><a href="#otospositionoffsettuner"><code>OTOSPositionOffsetTuner</code></a></li>
+      </ul>
+    </li>
+  </ul>
+</nav>
+
+
+ 
+      </div>
+    </aside>
+    
+  </main>
+
+  
+</body>
+</html>
+
+
+
+
+
+
+
+
+
+
+
+
