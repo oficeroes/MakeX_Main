@@ -1381,7 +1381,7 @@ while True:
                 if sv is not None:
                     angle = sv.get_value('angle')
                     if abs(angle) > 10:
-                        sv.set_power(GRIP_RELEASE_POWER)
+                        sv.set_power(GRIP_CLOSE_POWER)
                         _grip_releasing[cur_servo_idx] = True
                         _grip_release_start[cur_servo_idx] = novapi.timer()
                     else:

@@ -34,11 +34,45 @@ python -m step_planner.main
 
 机器人端程序依赖 Novapi、mBuild 设备和对应硬件连接，普通电脑上不能直接运行。电机端口、底盘尺寸、编码器比例等参数与具体硬件有关；在真实设备上使用前，需按 [`docs/README.md`](docs/README.md) 和 [`docs/TROUBLESHOOTING.md`](docs/TROUBLESHOOTING.md) 核对接线、标定并逐项测试。不要直接将仓库内的赛场参数套用到其他机器人。
 
+## 实物、界面与演示
+
+下列图片和视频来自本项目桌面资料。照片呈现机器人结构，视频仅展示录制片段中的运行现象；它们不能单独证明仓库所有功能都已完成实车验证。素材未附精确的固件提交号，复现时仍须核对接线与参数。
+
+| 项目素材 | 说明 |
+| --- | --- |
+| [三轮全向机器人实物图](docs/media/three_wheel_robot.png) | 展示三轮底盘与装置外观。 |
+| [三轮底盘运行片段](docs/media/three_wheel_demo_1080p.mp4) | 可见机器人在地面移动及球体；视频是原片压缩版。 |
+| [四轮麦克纳姆机器人实物图](docs/media/four_wheel_robot.png) | 展示四轮底盘与装置外观；图片背景经过处理。 |
+| [四轮机器人赛场片段](docs/media/four_wheel_field_demo_1080p.mp4) | 可见机器人在 MakeX 场地移动；视频是原片压缩版。 |
+| [步骤规划器界面截图](docs/media/step_planner_three_wheel.png) | 显示三轮模式的步骤规划界面。 |
+
+三轮全向机器人（实物结构）：
+
+<img src="docs/media/three_wheel_robot.png" alt="三轮全向机器人实物" width="360">
+
+四轮麦克纳姆机器人（实物结构，背景经过处理）：
+
+<img src="docs/media/four_wheel_robot.png" alt="四轮麦克纳姆机器人实物" width="360">
+
+三轮模式的步骤规划器界面：
+
+<img src="docs/media/step_planner_three_wheel.png" alt="三轮模式步骤规划器界面" width="700">
+
+三轮底盘运行画面预览：
+
+[![三轮底盘运行画面](docs/media/three_wheel_demo_still.jpg)](docs/media/three_wheel_demo_1080p.mp4)
+
+四轮机器人赛场画面预览：
+
+[![四轮机器人赛场画面](docs/media/four_wheel_demo_still.jpg)](docs/media/four_wheel_field_demo_1080p.mp4)
+
+三轮与四轮的硬件、软件对应关系见[两车结构讲解](docs/两车结构讲解/README.md)。
+
 ## 目前的证据与限制
 
 - 仓库保存了控制程序、规划器源码、轨迹数据与测试文件，可检查实现过程。
 - [`docs/lessons-learned/`](docs/lessons-learned/) 分开记录了实车调试问题和静态检查结果；其中明确写为“未经实车”的功能，仍以待验证处理。
-- 仓库已收录当前源码的规划器桌面界面截图，尚无完整实车演示视频。实物照片如需与代码建立对应关系，应补充具体机器人型号、程序版本和测试日期。
+- 仓库已收录两种规划工具的界面截图，以及三轮、四轮机器人的实物图和运行片段。视频是局部演示，尚缺按具体程序版本整理的完整实测记录；进一步对应仍应补机器人型号、程序版本和测试日期。
 - 这是持续迭代中的项目。历史备份、测试样本和赛场文件保留作过程记录，不宜把文件数量解读为已完成的功能数量。
 
 ## 文档
