@@ -1,3 +1,4 @@
+# 四轮麦克纳姆底盘：Novapi 机器人端程序，参数需按实际硬件标定。
 import novapi
 import time
 from mbuild import gamepad
@@ -78,6 +79,7 @@ if _HAS_SERVO:
     except Exception:
         _HAS_SERVO = False
 def mecanum_kinematics(Vx, Vy, omega):
+    # 将平移与旋转输入分配到四轮，并在超限时等比缩放。
     sc = STRAFE_VY_COUPLING
     if sc > 0.001 and abs(Vx) > abs(Vy) and abs(Vx) > 0.5:
         Vy = Vy - abs(Vx) * sc

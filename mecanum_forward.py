@@ -1,3 +1,4 @@
+# 三轮全向底盘：Novapi 机器人端程序，参数需按实际硬件标定。
 import novapi
 import time
 import math
@@ -188,10 +189,12 @@ def apply_response_curve(value, max_input=100.0):
     return sign * y
 
 def rotate_velocity(Vx, Vy, face_index):
+    # 将手柄方向转换到当前选定的三轮底盘正面。
     c, ns, s, nc = FACE_ROTATIONS[face_index]
     return (c * Vx + ns * Vy, s * Vx + nc * Vy)
 
 def omni_kinematics(Vx, Vy, omega):
+    # 按 120 度轮组布局分配功率，超限时保持比例缩放。
     M1 = -HALF * Vx - SQRT3_OVER_2 * Vy - omega
     M2 = -HALF * Vx + SQRT3_OVER_2 * Vy - omega
     M3 = Vx - omega
